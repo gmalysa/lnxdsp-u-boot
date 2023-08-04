@@ -841,6 +841,7 @@ int cadence_qspi_apb_write_setup(struct cadence_spi_priv *priv,
 	}
 
 	reg = opcode << CQSPI_REG_WR_INSTR_OPCODE_LSB;
+	reg |= CQSPI_REG_WR_INSTR_WELDIS_MASK;
 	reg |= priv->data_width << CQSPI_REG_WR_INSTR_TYPE_DATA_LSB;
 	reg |= priv->addr_width << CQSPI_REG_WR_INSTR_TYPE_ADDR_LSB;
 	writel(reg, priv->regbase + CQSPI_REG_WR_INSTR);
