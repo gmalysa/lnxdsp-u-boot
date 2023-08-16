@@ -411,18 +411,26 @@ static int cadence_qspi_enable_dtr(struct cadence_spi_priv *priv,
 
 	reg = readl(priv->regbase + CQSPI_REG_CONFIG);
 
-	if (enable) {
-		reg |= CQSPI_REG_CONFIG_DTR_PROTO;
+	switch (op->cmd.nbytes) {
+	case 1:
+		reg &= ~CQSPI_REG_CONFIG_DUAL_OPCODE;
+		break;
+	case 2:
 		reg |= CQSPI_REG_CONFIG_DUAL_OPCODE;
 
 		/* Set up command opcode extension. */
 		ret = cadence_qspi_setup_opcode_ext(priv, op, shift);
 		if (ret)
 			return ret;
-	} else {
-		reg &= ~CQSPI_REG_CONFIG_DTR_PROTO;
-		reg &= ~CQSPI_REG_CONFIG_DUAL_OPCODE;
+		break;
+	default:
+		return log_msg_ret("QSPI: Invalid command length", -EINVAL);
 	}
+
+	if (enable)
+		reg |= CQSPI_REG_CONFIG_DTR_PROTO;
+	else
+		reg &= ~CQSPI_REG_CONFIG_DTR_PROTO;
 
 	writel(reg, priv->regbase + CQSPI_REG_CONFIG);
 
@@ -464,10 +472,16 @@ int cadence_qspi_apb_command_read(struct cadence_spi_priv *priv,
 	unsigned int dummy_clk;
 	u8 opcode;
 
-	if (priv->dtr)
-		opcode = op->cmd.opcode >> 8;
-	else
+	switch (op->cmd.nbytes) {
+	case 1:
 		opcode = op->cmd.opcode;
+		break;
+	case 2:
+		opcode = op->cmd.opcode >> 8;
+		break;
+	default:
+		return log_msg_ret("QSPI: Invalid command length", -EINVAL);
+	}
 
 	if (opcode == CMD_4BYTE_OCTAL_READ && !priv->dtr)
 		opcode = CMD_4BYTE_FAST_READ;
@@ -556,10 +570,16 @@ int cadence_qspi_apb_command_write(struct cadence_spi_priv *priv,
 	void *reg_base = priv->regbase;
 	u8 opcode;
 
-	if (priv->dtr)
-		opcode = op->cmd.opcode >> 8;
-	else
+	switch (op->cmd.nbytes) {
+	case 1:
 		opcode = op->cmd.opcode;
+		break;
+	case 2:
+		opcode = op->cmd.opcode >> 8;
+		break;
+	default:
+		return log_msg_ret("QSPI: Invalid command length", -EINVAL);
+	}
 
 	reg |= opcode << CQSPI_REG_CMDCTRL_OPCODE_LSB;
 
@@ -633,10 +653,16 @@ int cadence_qspi_apb_read_setup(struct cadence_spi_priv *priv,
 	       priv->regbase + CQSPI_REG_INDIRECTTRIGGER);
 
 	/* Configure the opcode */
-	if (priv->dtr)
-		opcode = op->cmd.opcode >> 8;
-	else
+	switch (op->cmd.nbytes) {
+	case 1:
 		opcode = op->cmd.opcode;
+		break;
+	case 2:
+		opcode = op->cmd.opcode >> 8;
+		break;
+	default:
+		return log_msg_ret("QSPI: Invalid command length", -EINVAL);
+	}
 
 	rd_reg = opcode << CQSPI_REG_RD_INSTR_OPCODE_LSB;
 	rd_reg |= op->cmd.dtr ? CQSPI_REG_RD_INSTR_DDR_EN_MASK : 0;
@@ -803,10 +829,16 @@ int cadence_qspi_apb_write_setup(struct cadence_spi_priv *priv,
 	       priv->regbase + CQSPI_REG_INDIRECTTRIGGER);
 
 	/* Configure the opcode */
-	if (priv->dtr)
-		opcode = op->cmd.opcode >> 8;
-	else
+	switch (op->cmd.nbytes) {
+	case 1:
 		opcode = op->cmd.opcode;
+		break;
+	case 2:
+		opcode = op->cmd.opcode >> 8;
+		break;
+	default:
+		return log_msg_ret("QSPI: Invalid command length", -EINVAL);
+	}
 
 	reg = opcode << CQSPI_REG_WR_INSTR_OPCODE_LSB;
 	reg |= priv->data_width << CQSPI_REG_WR_INSTR_TYPE_DATA_LSB;
