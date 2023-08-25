@@ -852,19 +852,29 @@ int cadence_qspi_apb_write_setup(struct cadence_spi_priv *priv,
 
 	writel(op->addr.val, priv->regbase + CQSPI_REG_INDIRECTWRSTARTADDR);
 
-	if (priv->dtr) {
-		/*
-		 * Some flashes like the cypress Semper flash expect a 4-byte
-		 * dummy address with the Read SR command in DTR mode, but this
-		 * controller does not support sending address with the Read SR
-		 * command. So, disable write completion polling on the
-		 * controller's side. spi-nor will take care of polling the
-		 * status register.
-		 */
-		reg = readl(priv->regbase + CQSPI_REG_WR_COMPLETION_CTRL);
-		reg |= CQSPI_REG_WR_DISABLE_AUTO_POLL;
-		writel(reg, priv->regbase + CQSPI_REG_WR_COMPLETION_CTRL);
-	}
+	/*
+	 * Some flashes like the cypress Semper flash expect a 4-byte
+	 * dummy address with the Read SR command in DTR mode, but this
+	 * controller does not support sending address with the Read SR
+	 * command. So, disable write completion polling on the
+	 * controller's side. spi-nor will take care of polling the
+	 * status register.
+	 *
+	 * Theoretically, some flashes have their WIP bit in different
+	 * bit positions or have a different bit polarity. spi-nor
+	 * currently does not have an interface in place to dictate
+	 * this information to this driver for proper configuration.
+	 *
+	 * The default of the controller hardware has this status register
+	 * auto polling without expiration. This means that if there is any
+	 * controller misconfiguration or communication failure, it will
+	 * completely lock up the controller.
+	 *
+	 * Thus, unconditionally disable this feature for now.
+	 */
+	reg = readl(priv->regbase + CQSPI_REG_WR_COMPLETION_CTRL);
+	reg |= CQSPI_REG_WR_DISABLE_AUTO_POLL;
+	writel(reg, priv->regbase + CQSPI_REG_WR_COMPLETION_CTRL);
 
 	reg = readl(priv->regbase + CQSPI_REG_SIZE);
 	reg &= ~CQSPI_REG_SIZE_ADDRESS_MASK;
@@ -969,16 +979,8 @@ int cadence_qspi_apb_write_execute(struct cadence_spi_priv *priv,
 	const void *buf = op->data.buf.out;
 	size_t len = op->data.nbytes;
 
-	/*
-	 * Some flashes like the Cypress Semper flash expect a dummy 4-byte
-	 * address (all 0s) with the read status register command in DTR mode.
-	 * But this controller does not support sending dummy address bytes to
-	 * the flash when it is polling the write completion register in DTR
-	 * mode. So, we can not use direct mode when in DTR mode for writing
-	 * data.
-	 */
 	cadence_qspi_apb_enable_linear_mode(true);
-	if (!priv->dtr && priv->use_dac_mode && (to + len < priv->ahbsize)) {
+	if (priv->use_dac_mode && (to + len < priv->ahbsize)) {
 		memcpy_toio(priv->ahbbase + to, buf, len);
 		if (!cadence_qspi_wait_idle(priv->regbase))
 			return -EIO;
