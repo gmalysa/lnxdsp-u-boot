@@ -61,6 +61,7 @@
 #define CQSPI_REG_RD_INSTR                      0x04
 #define CQSPI_REG_RD_INSTR_OPCODE_LSB           0
 #define CQSPI_REG_RD_INSTR_TYPE_INSTR_LSB       8
+#define CQSPI_REG_RD_INSTR_DDR_EN_MASK          BIT(10)
 #define CQSPI_REG_RD_INSTR_TYPE_ADDR_LSB        12
 #define CQSPI_REG_RD_INSTR_TYPE_DATA_LSB        16
 #define CQSPI_REG_RD_INSTR_MODE_EN_LSB          20

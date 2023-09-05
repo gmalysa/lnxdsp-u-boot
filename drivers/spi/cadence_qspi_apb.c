@@ -445,6 +445,7 @@ int cadence_qspi_apb_command_read_setup(struct cadence_spi_priv *priv,
 		return ret;
 
 	reg = cadence_qspi_calc_rdreg(priv);
+	reg |= op->cmd.dtr ? CQSPI_REG_RD_INSTR_DDR_EN_MASK : 0;
 	writel(reg, priv->regbase + CQSPI_REG_RD_INSTR);
 
 	return 0;
@@ -536,6 +537,7 @@ int cadence_qspi_apb_command_write_setup(struct cadence_spi_priv *priv,
 		return ret;
 
 	reg = cadence_qspi_calc_rdreg(priv);
+	reg |= op->cmd.dtr ? CQSPI_REG_RD_INSTR_DDR_EN_MASK : 0;
 	writel(reg, priv->regbase + CQSPI_REG_RD_INSTR);
 
 	return 0;
@@ -637,6 +639,7 @@ int cadence_qspi_apb_read_setup(struct cadence_spi_priv *priv,
 		opcode = op->cmd.opcode;
 
 	rd_reg = opcode << CQSPI_REG_RD_INSTR_OPCODE_LSB;
+	rd_reg |= op->cmd.dtr ? CQSPI_REG_RD_INSTR_DDR_EN_MASK : 0;
 	rd_reg |= cadence_qspi_calc_rdreg(priv);
 
 	writel(op->addr.val, priv->regbase + CQSPI_REG_INDIRECTRDSTARTADDR);
@@ -811,6 +814,7 @@ int cadence_qspi_apb_write_setup(struct cadence_spi_priv *priv,
 	writel(reg, priv->regbase + CQSPI_REG_WR_INSTR);
 
 	reg = cadence_qspi_calc_rdreg(priv);
+	reg |= op->cmd.dtr ? CQSPI_REG_RD_INSTR_DDR_EN_MASK : 0;
 	writel(reg, priv->regbase + CQSPI_REG_RD_INSTR);
 
 	writel(op->addr.val, priv->regbase + CQSPI_REG_INDIRECTWRSTARTADDR);
