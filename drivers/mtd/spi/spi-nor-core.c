@@ -3967,6 +3967,76 @@ static struct spi_nor_fixups macronix_octal_fixups = {
 };
 #endif /* CONFIG_SPI_FLASH_MACRONIX */
 
+#ifdef CONFIG_SPI_FLASH_ISSI
+/**
+ * spi_nor_issi_octal_dtr_enable() - Enable octal DTR on ISSI flashes.
+ * @nor:	pointer to a 'struct spi_nor'
+ *
+ * Return: 0 on success, -errno otherwise.
+ */
+static int spi_nor_issi_octal_dtr_enable(struct spi_nor *nor)
+{
+	struct spi_mem_op op;
+	int ret;
+	u8 regval;
+
+	nor->read_dummy = ISSI_MAX_DC;
+
+	ret = write_enable(nor);
+	if (ret)
+		return ret;
+
+	regval = SPINOR_REG_ISSI_VCR_ODDR_EN;
+	op = (struct spi_mem_op)
+		SPI_MEM_OP(SPI_MEM_OP_CMD(SPINOR_OP_ISSI_WR_VCR, 1),
+			   SPI_MEM_OP_ADDR(3, SPINOR_REG_ISSI_VCR_IOMODE, 1),
+			   SPI_MEM_OP_NO_DUMMY,
+			   SPI_MEM_OP_DATA_OUT(1, &regval, 1));
+
+	ret = spi_mem_exec_op(nor->spi, &op);
+	if (ret) {
+		dev_err(nor->dev, "Failed to enable octal DTR mode\n");
+		return ret;
+	}
+
+	nor->reg_proto = SNOR_PROTO_8_8_8_DTR;
+
+	return 0;
+}
+
+static void issi_octal_default_init(struct spi_nor *nor)
+{
+	nor->octal_dtr_enable = spi_nor_issi_octal_dtr_enable;
+}
+
+static void issi_octal_post_sfdp_fixup(struct spi_nor *nor,
+				       struct spi_nor_flash_parameter *params)
+{
+	/*
+	 * Adding SNOR_HWCAPS_PP_8_8_8_DTR in hwcaps.mask when
+	 * SPI_NOR_OCTAL_DTR_READ flag exists.
+	 */
+	if (params->hwcaps.mask & SNOR_HWCAPS_READ_8_8_8_DTR)
+		params->hwcaps.mask |= SNOR_HWCAPS_PP_8_8_8_DTR;
+	nor->cmd_ext_type = SPI_NOR_EXT_INVERT;
+
+	spi_nor_set_read_settings(&params->reads[SNOR_CMD_READ_8_8_8_DTR],
+				  0, 16, 0x0c, SNOR_PROTO_8_8_8_DTR);
+	spi_nor_set_pp_settings(&params->page_programs[SNOR_CMD_PP_8_8_8_DTR],
+				0x12, SNOR_PROTO_8_8_8_DTR);
+
+	params->rdsr_dummy = 8;
+
+	nor->flags |= SNOR_F_IO_MODE_EN_VOLATILE;
+	nor->flags |= SNOR_F_SOFT_RESET;
+}
+
+static struct spi_nor_fixups issi_octal_dtr_fixups = {
+	.default_init = issi_octal_default_init,
+	.post_sfdp = issi_octal_post_sfdp_fixup,
+};
+#endif /* CONFIG_SPI_FLASH_ISSI */
+
 /** spi_nor_octal_dtr_enable() - enable Octal DTR I/O if needed
  * @nor:                 pointer to a 'struct spi_nor'
  *
@@ -4158,6 +4228,14 @@ void spi_nor_set_fixups(struct spi_nor *nor)
 #ifdef CONFIG_SPI_FLASH_MT35XU
 	if (!strcmp(nor->info->name, "mt35xu512aba"))
 		nor->fixups = &mt35xu512aba_fixups;
+#endif
+
+#if CONFIG_IS_ENABLED(SPI_FLASH_ISSI)
+	if (JEDEC_MFR(nor->info) == SNOR_MFR_ISSI) {
+		if ((nor->info->id[1] == 0x5a || nor->info->id[1] == 0x5b) &&
+		    (nor->info->id[2] == 0x19 || nor->info->id[2] == 0x18))
+			nor->fixups = &issi_octal_dtr_fixups;
+	}
 #endif
 
 #if CONFIG_IS_ENABLED(SPI_FLASH_MACRONIX)

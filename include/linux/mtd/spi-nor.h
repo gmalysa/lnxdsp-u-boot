@@ -131,6 +131,12 @@
 #define SPINOR_REG_MXIC_DC_20		0x0		/* Setting dummy cycles to 20 */
 #define MXIC_MAX_DC			20		/* Maximum value of dummy cycles */
 
+/* Used for ISSI flashes. */
+#define SPINOR_OP_ISSI_WR_VCR		0x81
+#define SPINOR_REG_ISSI_VCR_IOMODE	0x0
+#define SPINOR_REG_ISSI_VCR_ODDR_EN	0xe7
+#define ISSI_MAX_DC			16
+
 /* Used for Spansion flashes only. */
 #define SPINOR_OP_BRWR		0x17	/* Bank register write */
 #define SPINOR_OP_BRRD		0x16	/* Bank register read */
