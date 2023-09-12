@@ -265,7 +265,6 @@ struct cadence_spi_priv {
 	u8		inst_width;
 	u8		addr_width;
 	u8		data_width;
-	bool		dtr;
 };
 
 /* Functions call declaration */

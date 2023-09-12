@@ -119,17 +119,6 @@ static int cadence_qspi_set_protocol(struct cadence_spi_priv *priv,
 {
 	int ret;
 
-	/*
-	 * For an op to be DTR, cmd phase along with every other non-empty
-	 * phase should have dtr field set to 1. If an op phase has zero
-	 * nbytes, ignore its dtr field; otherwise, check its dtr field.
-	 * Also, dummy checks not performed here Since supports_op()
-	 * already checks that all or none of the fields are DTR.
-	 */
-	priv->dtr = op->cmd.dtr &&
-		    (!op->addr.nbytes || op->addr.dtr) &&
-		    (!op->data.nbytes || op->data.dtr);
-
 	ret = cadence_qspi_buswidth_to_inst_type(op->cmd.buswidth);
 	if (ret < 0)
 		return ret;
@@ -448,7 +437,7 @@ int cadence_qspi_apb_command_read_setup(struct cadence_spi_priv *priv,
 		return ret;
 
 	ret = cadence_qspi_enable_dtr(priv, op, CQSPI_REG_OP_EXT_STIG_LSB,
-				      priv->dtr);
+				      op->cmd.dtr);
 	if (ret)
 		return ret;
 
@@ -483,13 +472,13 @@ int cadence_qspi_apb_command_read(struct cadence_spi_priv *priv,
 		return log_msg_ret("QSPI: Invalid command length", -EINVAL);
 	}
 
-	if (opcode == CMD_4BYTE_OCTAL_READ && !priv->dtr)
+	if (opcode == CMD_4BYTE_OCTAL_READ && !op->cmd.dtr)
 		opcode = CMD_4BYTE_FAST_READ;
 
 	reg = opcode << CQSPI_REG_CMDCTRL_OPCODE_LSB;
 
 	/* Set up dummy cycles. */
-	dummy_clk = cadence_qspi_calc_dummy(op, priv->dtr);
+	dummy_clk = cadence_qspi_calc_dummy(op, op->cmd.dtr);
 	if (dummy_clk > CQSPI_DUMMY_CLKS_MAX)
 		return -ENOTSUPP;
 
@@ -546,7 +535,7 @@ int cadence_qspi_apb_command_write_setup(struct cadence_spi_priv *priv,
 		return ret;
 
 	ret = cadence_qspi_enable_dtr(priv, op, CQSPI_REG_OP_EXT_STIG_LSB,
-				      priv->dtr);
+				      op->cmd.dtr);
 	if (ret)
 		return ret;
 
@@ -596,7 +585,7 @@ int cadence_qspi_apb_command_write(struct cadence_spi_priv *priv,
 	}
 
 	/* Set up dummy cycles. */
-	dummy_clk = cadence_qspi_calc_dummy(op, priv->dtr);
+	dummy_clk = cadence_qspi_calc_dummy(op, op->cmd.dtr);
 	if (dummy_clk > CQSPI_DUMMY_CLKS_MAX)
 		return -EOPNOTSUPP;
 
@@ -644,7 +633,7 @@ int cadence_qspi_apb_read_setup(struct cadence_spi_priv *priv,
 		return ret;
 
 	ret = cadence_qspi_enable_dtr(priv, op, CQSPI_REG_OP_EXT_READ_LSB,
-				      priv->dtr);
+				      op->cmd.dtr);
 	if (ret)
 		return ret;
 
@@ -672,7 +661,7 @@ int cadence_qspi_apb_read_setup(struct cadence_spi_priv *priv,
 
 	if (dummy_bytes) {
 		/* Convert to clock cycles. */
-		dummy_clk = cadence_qspi_calc_dummy(op, priv->dtr);
+		dummy_clk = cadence_qspi_calc_dummy(op, op->cmd.dtr);
 
 		if (dummy_clk > CQSPI_DUMMY_CLKS_MAX)
 			return -ENOTSUPP;
@@ -820,7 +809,7 @@ int cadence_qspi_apb_write_setup(struct cadence_spi_priv *priv,
 		return ret;
 
 	ret = cadence_qspi_enable_dtr(priv, op, CQSPI_REG_OP_EXT_WRITE_LSB,
-				      priv->dtr);
+				      op->cmd.dtr);
 	if (ret)
 		return ret;
 

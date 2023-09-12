@@ -361,6 +361,12 @@ static bool cadence_spi_mem_supports_op(struct spi_slave *slave,
 	bool all_true, all_false;
 
 	/*
+	 * For an op to be DTR, cmd phase along with every other non-empty
+	 * phase should have dtr field set to 1. If an op phase has zero
+	 * nbytes, ignore its dtr field; otherwise, check its dtr field.
+	 * Also, dummy checks not performed here Since supports_op()
+	 * already checks that all or none of the fields are DTR.
+	 *
 	 * op->dummy.dtr is required for converting nbytes into ncycles.
 	 * Also, don't check the dtr field of the op phase having zero nbytes.
 	 */
