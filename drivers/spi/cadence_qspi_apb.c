@@ -783,7 +783,7 @@ int cadence_qspi_apb_read_execute(struct cadence_spi_priv *priv,
 
 	cadence_qspi_apb_enable_linear_mode(true);
 
-	if (priv->use_dac_mode && (from + len < priv->ahbsize)) {
+	if (op->addr.nbytes && priv->use_dac_mode && (from + len < priv->ahbsize)) {
 		if (len < 256 ||
 		    dma_memcpy(buf, priv->ahbbase + from, len) < 0) {
 			memcpy_fromio(buf, priv->ahbbase + from, len);
@@ -969,7 +969,7 @@ int cadence_qspi_apb_write_execute(struct cadence_spi_priv *priv,
 	size_t len = op->data.nbytes;
 
 	cadence_qspi_apb_enable_linear_mode(true);
-	if (priv->use_dac_mode && (to + len < priv->ahbsize)) {
+	if (op->addr.nbytes && priv->use_dac_mode && (to + len < priv->ahbsize)) {
 		memcpy_toio(priv->ahbbase + to, buf, len);
 		if (!cadence_qspi_wait_idle(priv->regbase))
 			return -EIO;
