@@ -3229,6 +3229,152 @@ static int spi_nor_select_erase(struct spi_nor *nor,
 	return 0;
 }
 
+#if CONFIG_IS_ENABLED(SPI_FLASH_HS_CALIB)
+/**
+ * Very basic check to make sure every bit changes in the reference pattern
+ * and that there aren't too many duplicate bytes in a row, such as all FF's
+ * or all zeros.
+ * Returns boolean.
+ */
+static int spi_nor_spimem_validate_calib_data(u8 *buff, size_t len)
+{
+	size_t i;
+	u8 prev;
+	u8 changed_bits = 0;
+	size_t changing = 0;
+
+	if (!buff || !len)
+		return 0;
+
+	prev = *buff;
+	for (i = 1; i < len; ++i) {
+		u8 changed = prev ^ buff[i];
+
+		changed_bits |= changed;
+		if (changed)
+			++changing;
+		prev = buff[i];
+	}
+	return (changing > (len / 2)) && (changed_bits == 0xff);
+}
+
+/** Returns 0 on success, negative error code on error.
+ */
+static int spi_nor_spimem_calib_read_chk(struct spi_slave *slave)
+{
+	struct spi_nor *nor = dev_get_uclass_priv(slave->dev);
+
+	ssize_t readval = nor->read(nor, nor->calib_off,
+				    nor->calib_size,
+				    nor->calib_buff);
+	if (readval != nor->calib_size) {
+		if (readval >= 0)
+			return -EIO;
+		return readval;
+	}
+	return (memcmp(nor->calib_ref_buff,
+		       nor->calib_buff, nor->calib_size) != 0);
+}
+
+static int spi_nor_spimem_calib(struct spi_nor *nor)
+{
+	int retval = 0;
+
+	if (!nor->calib_buff || !nor->calib_ref_buff)
+		return retval;
+
+	retval = spi_mem_calibrate(nor->spi, spi_nor_spimem_calib_read_chk);
+
+	devm_kfree(nor->dev, nor->calib_buff);
+	nor->calib_buff = NULL;
+	devm_kfree(nor->dev, nor->calib_ref_buff);
+	nor->calib_ref_buff = NULL;
+
+	return retval;
+}
+
+static
+int spi_nor_spimem_calib_init(struct spi_nor *nor,
+			      const struct spi_nor_flash_parameter *params,
+			      u32 shared_caps_mask)
+{
+	int err;
+	ssize_t readval;
+	ofnode np = dev_ofnode(nor->spi->dev);
+	u8 old_addr_width = nor->addr_width;
+
+	if (!spi_mem_has_calibrate(nor->spi))
+		return 0;
+
+	/* Select a supported 1x read command to obtain calibration
+	 * reference data.
+	 */
+	shared_caps_mask &= (SNOR_HWCAPS_READ | SNOR_HWCAPS_READ_FAST);
+	err = spi_nor_select_read(nor, params, shared_caps_mask);
+	if (err) {
+		dev_warn(nor->dev,
+			 "Skipping SPI-nor calibration: Can't select 1x read settings supported by both the controller and memory.\n");
+		return 0;
+	}
+
+	/* Default to read the first 2 pages of the flash. Usually, this
+	 * would contain a bootloader image. While this isn't an ideal
+	 * calibration pattern, it's hopefully good enough to get something
+	 * working most of the time.
+	 */
+	ofnode_read_u32(np, "calibration-offset", &nor->calib_off);
+	ofnode_read_u32(np, "calibration-length", &nor->calib_size);
+	if (!nor->calib_size)
+		nor->calib_size = 2 * nor->page_size;
+
+	if (nor->addr_width == 4 ||
+	    ((nor->calib_off + nor->calib_size) > SZ_16M)) {
+		/* Only support a >16MB calibration address if the flash chip
+		 * supports 4 byte commands. Otherwise, it would require
+		 * enabling 4 byte mode. This isn't handled until later, in
+		 * spi_nor_init()
+		 */
+		if (!(nor->flags & SPI_NOR_4B_OPCODES)) {
+			dev_warn(nor->dev,
+				 "Skipping SPI-nor calibration: calibration currently only supports 3 byte addressing.\n");
+			return 0;
+		}
+		nor->read_opcode = spi_nor_convert_3to4_read(nor->read_opcode);
+		nor->addr_width = 4;
+	} else {
+		nor->addr_width = 3;
+	}
+
+	nor->calib_ref_buff = devm_kmalloc(nor->dev, nor->calib_size,
+					   GFP_KERNEL);
+	nor->calib_buff = devm_kmalloc(nor->dev, nor->calib_size, GFP_KERNEL);
+	if (!nor->calib_ref_buff || !nor->calib_buff)
+		return -ENOMEM;
+
+	readval = nor->read(nor, nor->calib_off,
+			    nor->calib_size, nor->calib_ref_buff);
+	if (readval < 0)
+		return readval;
+	else if (nor->calib_size != readval)
+		return -EIO;
+
+	if (!spi_nor_spimem_validate_calib_data(nor->calib_ref_buff,
+						nor->calib_size)) {
+		devm_kfree(nor->dev, nor->calib_ref_buff);
+		devm_kfree(nor->dev, nor->calib_buff);
+		nor->calib_ref_buff = NULL;
+		nor->calib_buff = NULL;
+		dev_warn(nor->dev,
+			 "Skipping SPI-nor calibration: Calibration data has poor entropy.\n");
+	}
+
+	/* Restore settings. */
+	nor->addr_width = old_addr_width;
+
+	return 0;
+}
+#endif
+
 static int spi_nor_default_setup(struct spi_nor *nor,
 				 const struct flash_info *info,
 				 const struct spi_nor_flash_parameter *params)
@@ -3238,6 +3384,12 @@ static int spi_nor_default_setup(struct spi_nor *nor,
 	int err;
 
 	spi_nor_adjust_hwcaps(nor, params, &shared_mask);
+
+#if CONFIG_IS_ENABLED(SPI_FLASH_HS_CALIB)
+	err = spi_nor_spimem_calib_init(nor, params, shared_mask);
+	if (err)
+		return err;
+#endif
 
 	/* Select the (Fast) Read command. */
 	err = spi_nor_select_read(nor, params, shared_mask);
@@ -3891,6 +4043,14 @@ static int spi_nor_init(struct spi_nor *nor)
 		set_4byte(nor, nor->info, 1);
 	}
 
+#if CONFIG_IS_ENABLED(SPI_FLASH_HS_CALIB)
+	err = spi_nor_spimem_calib(nor);
+	if (err) {
+		dev_err(nor->dev, "SPI calibration failed\n");
+		return err;
+	}
+#endif
+
 	return 0;
 }
 
@@ -4055,6 +4215,14 @@ int spi_nor_scan(struct spi_nor *nor)
 	 */
 	spi_nor_soft_reset(nor);
 #endif /* CONFIG_SPI_FLASH_SOFT_RESET_ON_BOOT */
+
+#if CONFIG_IS_ENABLED(SPI_FLASH_HS_CALIB)
+	if (spi_mem_has_calibrate(nor->spi)) {
+		ret = spi_mem_calibrate(nor->spi, NULL);
+		if (ret)
+			return ret;
+	}
+#endif
 
 	info = spi_nor_read_id(nor);
 	if (IS_ERR_OR_NULL(info))

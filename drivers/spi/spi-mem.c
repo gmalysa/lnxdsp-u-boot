@@ -762,6 +762,30 @@ ssize_t spi_mem_dirmap_write(struct spi_mem_dirmap_desc *desc,
 }
 EXPORT_SYMBOL_GPL(spi_mem_dirmap_write);
 
+#if CONFIG_IS_ENABLED(SPI_FLASH_HS_CALIB)
+int spi_mem_has_calibrate(struct spi_slave *slave)
+{
+	struct udevice *bus = slave->dev->parent;
+	struct dm_spi_ops *ops = spi_get_ops(bus);
+
+	return (ops->mem_ops && ops->mem_ops->calibrate);
+}
+EXPORT_SYMBOL_GPL(spi_mem_has_calibrate);
+
+int spi_mem_calibrate(struct spi_slave *slave,
+		      int (*calib_chk_fn)(struct spi_slave *))
+{
+	struct udevice *bus = slave->dev->parent;
+	struct dm_spi_ops *ops = spi_get_ops(bus);
+
+	if (spi_mem_has_calibrate(slave))
+		return ops->mem_ops->calibrate(slave, calib_chk_fn);
+
+	return -ENOSYS;
+}
+EXPORT_SYMBOL_GPL(spi_mem_calibrate);
+#endif
+
 #ifndef __UBOOT__
 static inline struct spi_mem_driver *to_spi_mem_drv(struct device_driver *drv)
 {

@@ -127,6 +127,18 @@ config SPI_FLASH_SOFT_RESET_ON_BOOT
 	 that are not supposed to be handed to U-Boot in Octal DTR mode, even
 	 if they _do_ support the Soft Reset sequence.
 
+config SPI_FLASH_HS_CALIB
+	bool "Support for high-speed SPI flash calibration"
+	default n
+	help
+	 Modern flash chips and controllers that operate at speeds higher than
+	 50MHz require delays in the signal lines to be calibrated. This
+	 feature adds a spi-mem API hook to allow controller drivers to
+	 perform the calibration during chip probe.
+	 Select N here if SPI flash chips or controllers on your platform
+	 operate roughly around or less than 50MHz, or if the controller driver
+	 doesn't implement the calibration hook.
+
 config SPI_FLASH_BAR
 	bool "SPI flash Bank/Extended address register support"
 	help

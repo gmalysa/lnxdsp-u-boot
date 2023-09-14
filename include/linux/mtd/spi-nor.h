@@ -593,6 +593,13 @@ struct spi_nor {
 	u32 size;
 	u32 sector_size;
 	u32 erase_size;
+
+#if CONFIG_IS_ENABLED(SPI_FLASH_HS_CALIB)
+	u8	*calib_ref_buff;
+	u8	*calib_buff;
+	u32	calib_size;
+	u32	calib_off;
+#endif
 };
 
 #ifndef __UBOOT__

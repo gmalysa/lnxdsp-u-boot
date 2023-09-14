@@ -243,6 +243,15 @@ static inline void *spi_mem_get_drvdata(struct spi_mem *mem)
  *		  the currently mapped area), and the caller of
  *		  spi_mem_dirmap_write() is responsible for calling it again in
  *		  this case.
+ * @calibrate: instruct driver to perform or clear high speed calibration for
+ *	       the memory device. The provided function should be used by the
+ *	       driver to check if a calibration configuration is valid. May be
+ *	       called multiple times as needed. Do note that calling the check
+ *	       function may call back into the other ops in this interface.
+ *	       A null calib_chk_fn should clear any existing calibration.
+ *	       calib_chk_fn is expected to return 0 on success, negative error
+ *	       codes, and a positive value on failure.
+ *	       The same return value expectation for the calibrate function.
  *
  * This interface should be implemented by SPI controllers providing an
  * high-level interface to execute SPI memory operation, which is usually the
@@ -266,6 +275,10 @@ struct spi_controller_mem_ops {
 			       u64 offs, size_t len, void *buf);
 	ssize_t (*dirmap_write)(struct spi_mem_dirmap_desc *desc,
 				u64 offs, size_t len, const void *buf);
+#if CONFIG_IS_ENABLED(SPI_FLASH_HS_CALIB)
+	int (*calibrate)(struct spi_slave *slave,
+			 int (*calib_chk_fn)(struct spi_slave *));
+#endif
 };
 
 #ifndef __UBOOT__
@@ -340,6 +353,12 @@ ssize_t spi_mem_dirmap_read(struct spi_mem_dirmap_desc *desc,
 			    u64 offs, size_t len, void *buf);
 ssize_t spi_mem_dirmap_write(struct spi_mem_dirmap_desc *desc,
 			     u64 offs, size_t len, const void *buf);
+
+#if CONFIG_IS_ENABLED(SPI_FLASH_HS_CALIB)
+int spi_mem_has_calibrate(struct spi_slave *slave);
+int spi_mem_calibrate(struct spi_slave *slave,
+		      int (*calib_chk_fn)(struct spi_slave *));
+#endif
 
 #ifndef __UBOOT__
 int spi_mem_driver_register_with_owner(struct spi_mem_driver *drv,

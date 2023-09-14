@@ -61,6 +61,10 @@ contain the following properties.
                       used for MISO. Defaults to 1 if not present.
 - spi-half-duplex  - (optional) Indicates that the SPI bus should wait for
 		      a header byte before reading data from the slave.
+- calibration-offset - (optional) Check pattern offset location for high-
+		        speed calibration.
+- calibration-length - (optional) Check pattern length for high-speed
+		        calibration.
 
 Some SPI controllers and devices support Dual and Quad SPI transfer mode.
 It allows data in SPI system transferred in 2 wires(DUAL) or 4 wires(QUAD).
