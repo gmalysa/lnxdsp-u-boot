@@ -31,3 +31,12 @@ connected flash properties
 			  n_ss_out low and first bit transfer
 - cdns,max-read-delay	: Max safe value to use for the read capture delay
 			  during auto calibration.
+- cdns,spi-calib-frequency : Max safe SPI clock frequency to use before bus
+			     calibration is performed.
+- cdns,dqs		: Enable use of the DQS signal with the flash chip.
+- cdns,phy		: Enable use of the high-speed PHY feature with the
+			  flash chip. Generally required for speeds higher
+			  than 50MHz.
+- cdns,read-delay	: Optional pre-calibrated Read Delay Capture value.
+- cdns,phyrxdly		: Optional pre-calibrated PHY RX Delay value.
+- cdns,phytxdly		: Optional pre-calibrated PHY TX Delay value.

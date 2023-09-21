@@ -7,6 +7,7 @@
 #include <clk.h>
 #include <log.h>
 #include <asm-generic/io.h>
+#include <asm/io.h>
 #include <dma.h>
 #include <dm.h>
 #include <fdtdec.h>
@@ -29,6 +30,20 @@
 #define CQSPI_READ			2
 #define CQSPI_WRITE			3
 
+static bool is_calibrated(struct cadence_spi_priv *priv,
+			  struct spi_slave *slave)
+{
+	return (priv->qspi_calibrated_hz == priv->req_hz) &&
+	       (priv->qspi_calibrated_cs == spi_chip_select(slave->dev));
+}
+
+static void set_calibrated(struct cadence_spi_priv *priv,
+			   struct spi_slave *slave)
+{
+	priv->qspi_calibrated_hz = priv->req_hz;
+	priv->qspi_calibrated_cs = spi_chip_select(slave->dev);
+}
+
 __weak int cadence_qspi_apb_dma_read(struct cadence_spi_priv *priv,
 				     const struct spi_mem_op *op)
 {
@@ -48,18 +63,181 @@ __weak ofnode cadence_qspi_get_subnode(struct udevice *dev)
 static int cadence_spi_write_speed(struct udevice *bus, uint hz)
 {
 	struct cadence_spi_priv *priv = dev_get_priv(bus);
+	struct cadence_spi_plat *plat = dev_get_plat(bus);
 
 	cadence_qspi_apb_config_baudrate_div(priv->regbase,
 					     priv->ref_clk_hz, hz);
 
 	/* Reconfigure delay timing if speed is changed. */
 	cadence_qspi_apb_delay(priv->regbase, priv->ref_clk_hz, hz,
-			       priv->tshsl_ns, priv->tsd2d_ns,
-			       priv->tchsh_ns, priv->tslch_ns);
+			       plat->tshsl_ns, plat->tsd2d_ns,
+			       plat->tchsh_ns, plat->tslch_ns);
+}
+
+void cadence_spi_update_speed(struct udevice *bus, bool calibrated)
+{
+	struct cadence_spi_priv *priv = dev_get_priv(bus);
+	struct cadence_spi_plat *plat = dev_get_plat(bus);
+	void *regb = priv->regbase;
+	uint hz = priv->req_hz;
+	u32 rdc = 0;
+
+	if (!calibrated)
+		hz = plat->calib_hz;
+
+	/* Disable QSPI */
+	cadence_qspi_apb_controller_disable(regb);
+
+	if (calibrated) {
+		rdc = priv->read_delay;
+		if (plat->phy_support && plat->use_phy) {
+			cadence_qspi_apb_enable_phy(regb, true);
+			if (plat->slow_phy_tx)
+				hz /= 4;
+		}
+	} else if (plat->phy_support) {
+		cadence_qspi_apb_enable_phy(regb, false);
+	}
+
+	cadence_spi_write_speed(bus, hz);
+	cadence_qspi_apb_readdata_capture(priv, 1, rdc);
+
+	if (plat->phy_support)
+		cadence_qspi_apb_set_phy_cfg(regb,
+					     priv->phyrxdly, priv->phytxdly);
+
+	/* Enable QSPI */
+	cadence_qspi_apb_controller_enable(regb);
+}
+
+/* Calibration sequence to determine the read data capture delay register
+ * Returns 0 on success, negative error code.
+ */
+static int spi_non_phy_calibrate(struct spi_slave *slave,
+				 int (*test_read_fn)(struct spi_slave *))
+{
+	struct udevice *bus = slave->dev->parent;
+	struct cadence_spi_priv *priv = dev_get_priv(bus);
+	struct cadence_spi_plat *plat = dev_get_plat(bus);
+	void *base = priv->regbase;
+	int err = 0, i, range_lo = -1, range_hi = -1;
+
+	/* use back the intended clock and find low range */
+	cadence_spi_update_speed(bus, true);
+
+	for (i = 0; i < plat->max_read_delay; i++) {
+		/* Disable QSPI */
+		cadence_qspi_apb_controller_disable(base);
+
+		/* reconfigure the read data capture delay register */
+		cadence_qspi_apb_readdata_capture(priv, 1, i);
+
+		/* Enable back QSPI */
+		cadence_qspi_apb_controller_enable(base);
+
+		err = test_read_fn(slave);
+		if (err < 0) {
+			puts("SF: Calibration failed (read)\n");
+			goto err;
+		}
+
+		/* search for range lo */
+		if (range_lo == -1 && err == 0) {
+			range_lo = i;
+			continue;
+		}
+
+		/* search for range hi */
+		if (range_lo != -1 && err) {
+			range_hi = i - 1;
+			break;
+		}
+		range_hi = i;
+	}
+
+	if (range_lo == -1) {
+		puts("SF: Calibration failed (low range)\n");
+		err = -EIO;
+		goto err;
+	}
+
+	/* Disable QSPI for subsequent initialization */
+	cadence_qspi_apb_controller_disable(base);
+
+	priv->read_delay = (range_hi + range_lo) / 2;
+
+	/* configure the final value for read data capture delay register */
+	cadence_qspi_apb_readdata_capture(priv, 1, priv->read_delay);
+	debug("SF: Calibration: read-delay=%u (%i - %i)\n",
+	      priv->read_delay, range_lo, range_hi);
+
+	return 0;
+
+err:
+	cadence_spi_update_speed(bus, false);
+	return err;
+}
+
+#if CONFIG_IS_ENABLED(SPI_FLASH_HS_CALIB)
+static void clr_calibrated(struct cadence_spi_priv *priv,
+			   struct spi_slave *slave)
+{
+	priv->qspi_calibrated_hz = 0;
+}
+
+/* Returns 0 on success, negative error code.
+ */
+int cadence_spi_calibrate(struct spi_slave *slave,
+			  int (*test_read_fn)(struct spi_slave *))
+{
+	struct udevice *bus = slave->dev->parent;
+	struct cadence_spi_priv *priv = dev_get_priv(bus);
+	struct cadence_spi_plat *plat = dev_get_plat(bus);
+	int err = 0;
+
+	if (!test_read_fn) {
+		if (priv->qspi_calibrated_hz &&
+		    priv->qspi_calibrated_cs != spi_chip_select(slave->dev)) {
+			debug("%s: multiple chips on the bus not yet implemented\n",
+			      __func__);
+			return -ENOSYS;
+		}
+		clr_calibrated(priv, slave);
+		cadence_spi_update_speed(bus, false);
+		return 0;
+	}
+
+	/* todo: Allow recalibrations. This could be useful in the event
+	 * of a communication CRC failure. A recalibration could improve
+	 * signal quality. This however, requires implementing communication
+	 * CRC features in spi-nor.
+	 */
+	if (is_calibrated(priv, slave))
+		return 0;
+
+	if (plat->calib_cfg) {
+		set_calibrated(priv, slave);
+		cadence_spi_update_speed(bus, true);
+		return 0;
+	}
+
+	if (plat->use_phy)
+		err = cadence_qspi_apb_phy_calibrate(slave, test_read_fn);
+	else
+		err = spi_non_phy_calibrate(slave, test_read_fn);
+	if (err)
+		return err;
+
+	set_calibrated(priv, slave);
 
 	return 0;
 }
-
+#else
+/* NOTE: This will not work as expected if spi-nor has put the chip into a
+ * multi-io or DDR mode. Use CONFIG_SPI_FLASH_HS_CALIB.
+ * Calibrating from only 3 bytes is also not enough to get a reliable
+ * calibration range.
+ */
 static int cadence_spi_read_id(struct cadence_spi_priv *priv, u8 len,
 			       u8 *idcode)
 {
@@ -73,122 +251,75 @@ static int cadence_spi_read_id(struct cadence_spi_priv *priv, u8 len,
 	err = cadence_qspi_apb_command_read_setup(priv, &op);
 	if (!err)
 		err = cadence_qspi_apb_command_read(priv, &op);
-
 	return err;
 }
 
-/* Calibration sequence to determine the read data capture delay register */
-static int spi_calibration(struct udevice *bus, uint hz)
+/* Returns 0 on success, negative error code.
+ */
+static int cadence_spi_legacy_non_phy_calib_chk(struct spi_slave *slave)
 {
+	struct udevice *bus = slave->dev->parent;
 	struct cadence_spi_priv *priv = dev_get_priv(bus);
-	void *base = priv->regbase;
-	unsigned int idcode = 0, temp = 0;
-	int err = 0, i, range_lo = -1, range_hi = -1;
+	u32 temp = 0;
 
-	/* start with slowest clock (1 MHz) */
-	cadence_spi_write_speed(bus, 1000000);
+	int err = cadence_spi_read_id(priv, 3, (u8 *)&temp);
 
-	/* configure the read data capture delay register to 0 */
-	cadence_qspi_apb_readdata_capture(base, 1, 0);
+	if (err)
+		return err;
 
-	/* Enable QSPI */
-	cadence_qspi_apb_controller_enable(base);
+	return temp != priv->chipid;
+}
+
+/* Calibration sequence to determine the read data capture delay register
+ * Returns 0 on success, negative error code.
+ */
+static int legacy_spi_calibration(struct spi_slave *slave)
+{
+	struct udevice *bus = slave->dev->parent;
+	struct cadence_spi_priv *priv = dev_get_priv(bus);
+	struct cadence_spi_plat *plat = dev_get_plat(bus);
+	int err = 0;
+
+	if (is_calibrated(priv, slave)) {
+		return 0;
+	} else if (plat->calib_cfg) {
+		set_calibrated(priv, slave);
+		cadence_spi_update_speed(bus, true);
+		return 0;
+	}
+
+	cadence_spi_update_speed(bus, false);
 
 	/* read the ID which will be our golden value */
-	err = cadence_spi_read_id(priv, 3, (u8 *)&idcode);
+	err = cadence_spi_read_id(priv, 3, (u8 *)&priv->chipid);
 	if (err) {
 		puts("SF: Calibration failed (read)\n");
 		return err;
 	}
 
-	/* use back the intended clock and find low range */
-	cadence_spi_write_speed(bus, hz);
-	for (i = 0; i < priv->max_read_delay; i++) {
-		/* Disable QSPI */
-		cadence_qspi_apb_controller_disable(base);
-
-		/* reconfigure the read data capture delay register */
-		cadence_qspi_apb_readdata_capture(base, 1, i);
-
-		/* Enable back QSPI */
-		cadence_qspi_apb_controller_enable(base);
-
-		/* issue a RDID to get the ID value */
-		err = cadence_spi_read_id(priv, 3, (u8 *)&temp);
-		if (err) {
-			puts("SF: Calibration failed (read)\n");
-			return err;
-		}
-
-		/* search for range lo */
-		if (range_lo == -1 && temp == idcode) {
-			range_lo = i;
-			continue;
-		}
-
-		/* search for range hi */
-		if (range_lo != -1 && temp != idcode) {
-			range_hi = i - 1;
-			break;
-		}
-		range_hi = i;
-	}
-
-	if (range_lo == -1) {
-		puts("SF: Calibration failed (low range)\n");
+	err = spi_non_phy_calibrate(slave, cadence_spi_legacy_non_phy_calib_chk);
+	if (err)
 		return err;
-	}
 
-	/* Disable QSPI for subsequent initialization */
-	cadence_qspi_apb_controller_disable(base);
-
-	/* configure the final value for read data capture delay register */
-	cadence_qspi_apb_readdata_capture(base, 1, (range_hi + range_lo) / 2);
-	debug("SF: Read data capture delay calibrated to %i (%i - %i)\n",
-	      (range_hi + range_lo) / 2, range_lo, range_hi);
-
-	/* just to ensure we do once only when speed or chip select change */
-	priv->qspi_calibrated_hz = hz;
-	priv->qspi_calibrated_cs = spi_chip_select(bus);
+	set_calibrated(priv, slave);
 
 	return 0;
 }
+#endif
 
 static int cadence_spi_set_speed(struct udevice *bus, uint hz)
 {
 	struct cadence_spi_priv *priv = dev_get_priv(bus);
-	int err;
-
-	if (!hz || hz > priv->max_hz)
-		hz = priv->max_hz;
-	/* Disable QSPI */
-	cadence_qspi_apb_controller_disable(priv->regbase);
-
 	/*
-	 * If the device tree already provides a read delay value, use that
-	 * instead of calibrating.
+	 * In the high speed calib case, clibration clearing will then apply
+	 * the max non-calibrated speed.
+	 * When calibration occurs later, it will then apply the full requested
+	 * speed.
+	 *
+	 * In the legacy calibration case, exec_op calls check if the new
+	 * speed needs to be applied.
 	 */
-	if (priv->read_delay >= 0) {
-		cadence_spi_write_speed(bus, hz);
-		cadence_qspi_apb_readdata_capture(priv->regbase, 1,
-						  priv->read_delay);
-	} else if (priv->previous_hz != hz ||
-		   priv->qspi_calibrated_hz != hz ||
-		   priv->qspi_calibrated_cs != spi_chip_select(bus)) {
-		/*
-		 * Calibration required for different current SCLK speed,
-		 * requested SCLK speed or chip select
-		 */
-		err = spi_calibration(bus, hz);
-		if (err)
-			return err;
-
-		/* prevent calibration run when same as previous request */
-		priv->previous_hz = hz;
-	}
-
-	/* Enable QSPI */
-	cadence_qspi_apb_controller_enable(priv->regbase);
+	priv->req_hz = hz;
 
 	debug("%s: speed=%d\n", __func__, hz);
 
@@ -238,6 +369,7 @@ static int cadence_spi_probe(struct udevice *bus)
 	struct clk clk;
 	int ret;
 
+	priv->plat		= plat;
 	priv->regbase		= plat->regbase;
 	priv->ahbbase		= plat->ahbbase;
 	priv->is_dma		= plat->is_dma;
@@ -245,17 +377,10 @@ static int cadence_spi_probe(struct udevice *bus)
 	priv->fifo_depth	= plat->fifo_depth;
 	priv->fifo_width	= plat->fifo_width;
 	priv->trigger_address	= plat->trigger_address;
-	priv->max_read_delay	= plat->max_read_delay;
-	priv->read_delay	= plat->read_delay;
 	priv->ahbsize		= plat->ahbsize;
-	priv->max_hz		= plat->max_hz;
-
-	priv->page_size		= plat->page_size;
-	priv->block_size	= plat->block_size;
-	priv->tshsl_ns		= plat->tshsl_ns;
-	priv->tsd2d_ns		= plat->tsd2d_ns;
-	priv->tchsh_ns		= plat->tchsh_ns;
-	priv->tslch_ns		= plat->tslch_ns;
+	priv->read_delay	= plat->read_delay;
+	priv->phyrxdly		= plat->phyrxdly;
+	priv->phytxdly		= plat->phytxdly;
 
 	priv->ops.direct_read_copy = cadence_qspi_apb_direct_read_copy;
 	priv->ops.direct_write_copy = cadence_qspi_apb_direct_write_copy;
@@ -353,6 +478,33 @@ static int cadence_spi_mem_exec_op(struct spi_slave *spi,
 	cadence_qspi_apb_chipselect(base, spi_chip_select(spi->dev),
 				    priv->is_decoded_cs);
 
+	/* todo: Due to there only being 1 declaration of per-flash parameters,
+	 * this driver only ever correctly supported 1 chip on the bus.
+	 * Per-flash data must be moved into a data structure that can lookup
+	 * by chip select.
+	 */
+#if CONFIG_IS_ENABLED(SPI_FLASH_HS_CALIB)
+	if (priv->qspi_calibrated_hz &&
+	    priv->qspi_calibrated_cs != spi_chip_select(spi->dev)) {
+		debug("%s: multiple chips on the bus not yet implemented\n",
+		      __func__);
+		return -ENOSYS;
+	} else if (is_calibrated(priv, spi) &&
+		   priv->qspi_calibrated_hz != priv->req_hz) {
+		debug("%s: speed change after calibration not yet supported\n",
+		      __func__);
+		return -ENOSYS;
+	}
+#else
+	/* Regardless of the above, attempt a recalib anyway. */
+	if (!is_calibrated(priv, spi) ||
+	    priv->qspi_calibrated_hz != priv->req_hz) {
+		err = legacy_spi_calibration(spi);
+		if (err)
+			return err;
+	}
+#endif
+
 	if (op->data.dir == SPI_MEM_DATA_IN && op->data.buf.in) {
 		/*
 		 * Performing reads in DAC mode forces to read minimum 4 bytes
@@ -440,6 +592,7 @@ static int cadence_spi_of_to_plat(struct udevice *bus)
 {
 	struct cadence_spi_plat *plat = dev_get_plat(bus);
 	struct cadence_spi_priv *priv = dev_get_priv(bus);
+	struct cadence_spi_plat *chip = plat;
 	ofnode subnode;
 
 	plat->regbase = devfdt_get_addr_index_ptr(bus, 0);
@@ -456,6 +609,12 @@ static int cadence_spi_of_to_plat(struct udevice *bus)
 
 	plat->is_dma = dev_read_bool(bus, "cdns,is-dma");
 
+	if (CONFIG_IS_ENABLED(SPI_FLASH_HS_CALIB))
+		plat->phy_support = bus->driver_data & CQSPI_HW_SUPPORTS_PHY;
+
+	plat->slow_phy_tx = plat->phy_support && (bus->driver_data
+		& CQSPI_QUIRK_SLOW_PHY_TX_DMA);
+
 	plat->max_read_delay = dev_read_u32_default(bus,
 						    "cdns,max-read-delay",
 						    CQSPI_READ_CAPTURE_MAX_DELAY);
@@ -463,37 +622,41 @@ static int cadence_spi_of_to_plat(struct udevice *bus)
 	/* All other parameters are embedded in the child node */
 	subnode = cadence_qspi_get_subnode(bus);
 	if (!ofnode_valid(subnode)) {
-		printf("Error: subnode with SPI flash config missing!\n");
+		debug("Error: subnode with SPI flash config missing!\n");
 		return -ENODEV;
 	}
 
-	/* Use 500 KHz as a suitable default */
-	plat->max_hz = ofnode_read_u32_default(subnode, "spi-max-frequency",
-					       500000);
-
 	/* Read other parameters from DT */
-	plat->page_size = ofnode_read_u32_default(subnode, "page-size", 256);
-	plat->block_size = ofnode_read_u32_default(subnode, "block-size", 16);
-	plat->tshsl_ns = ofnode_read_u32_default(subnode, "cdns,tshsl-ns",
+	chip->page_size = ofnode_read_u32_default(subnode, "page-size", 256);
+	chip->block_size = ofnode_read_u32_default(subnode, "block-size", 16);
+	chip->tshsl_ns = ofnode_read_u32_default(subnode, "cdns,tshsl-ns",
 						 200);
-	plat->tsd2d_ns = ofnode_read_u32_default(subnode, "cdns,tsd2d-ns",
+	chip->tsd2d_ns = ofnode_read_u32_default(subnode, "cdns,tsd2d-ns",
 						 255);
-	plat->tchsh_ns = ofnode_read_u32_default(subnode, "cdns,tchsh-ns", 20);
-	plat->tslch_ns = ofnode_read_u32_default(subnode, "cdns,tslch-ns", 20);
-	/*
-	 * Read delay should be an unsigned value but we use a signed integer
-	 * so that negative values can indicate that the device tree did not
-	 * specify any signed values and we need to perform the calibration
-	 * sequence to find it out.
-	 */
-	plat->read_delay = ofnode_read_s32_default(subnode, "cdns,read-delay",
-						   -1);
-	if (plat->read_delay > plat->max_read_delay)
-		plat->read_delay = plat->max_read_delay;
+	chip->tchsh_ns = ofnode_read_u32_default(subnode, "cdns,tchsh-ns", 20);
+	chip->tslch_ns = ofnode_read_u32_default(subnode, "cdns,tslch-ns", 20);
 
-	debug("%s: regbase=%p ahbbase=%p max-frequency=%d page-size=%d\n",
-	      __func__, plat->regbase, plat->ahbbase, plat->max_hz,
-	      plat->page_size);
+	chip->calib_hz = ofnode_read_u32_default(subnode,
+						 "cdns,spi-calib-frequency",
+						 1000000);
+
+	chip->use_dqs = ofnode_read_bool(subnode, "cdns,dqs");
+	chip->use_phy = ofnode_read_bool(subnode, "cdns,phy") && plat->phy_support;
+
+	if (!ofnode_read_u32(subnode, "cdns,read-delay", &chip->read_delay))
+		chip->calib_cfg |= true;
+	if (chip->read_delay > plat->max_read_delay)
+		chip->read_delay = plat->max_read_delay;
+
+	if (!ofnode_read_u32(subnode, "cdns,phyrxdly", &chip->phyrxdly) ||
+	    !ofnode_read_u32(subnode, "cdns,phytxdly", &chip->phytxdly)) {
+		chip->calib_cfg |= true;
+		if (!chip->use_phy)
+			debug("PHY delays configured but PHY mode is not enabled!\n");
+	}
+
+	debug("%s: regbase=%p ahbbase=%p page-size=%d\n",
+	      __func__, plat->regbase, plat->ahbbase, plat->page_size);
 
 	return 0;
 }
@@ -501,6 +664,9 @@ static int cadence_spi_of_to_plat(struct udevice *bus)
 static const struct spi_controller_mem_ops cadence_spi_mem_ops = {
 	.exec_op = cadence_spi_mem_exec_op,
 	.supports_op = cadence_spi_mem_supports_op,
+#if CONFIG_IS_ENABLED(SPI_FLASH_HS_CALIB)
+	.calibrate = cadence_spi_calibrate,
+#endif
 };
 
 static const struct dm_spi_ops cadence_spi_ops = {
@@ -516,6 +682,8 @@ static const struct dm_spi_ops cadence_spi_ops = {
 static const struct udevice_id cadence_spi_ids[] = {
 	{ .compatible = "cdns,qspi-nor" },
 	{ .compatible = "ti,am654-ospi" },
+	{ .compatible = "adi,sc59x-ospi", .data =
+		CQSPI_HW_SUPPORTS_PHY | CQSPI_QUIRK_SLOW_PHY_TX_DMA },
 	{ }
 };
 

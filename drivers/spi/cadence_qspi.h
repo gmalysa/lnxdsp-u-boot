@@ -11,11 +11,17 @@
 #include <linux/mtd/spi-nor.h>
 #include <spi-mem.h>
 
+/* HWcaps */
+#define CQSPI_HW_SUPPORTS_PHY		BIT(0)
+/* Quirks */
+#define CQSPI_QUIRK_SLOW_PHY_TX_DMA	BIT(16)
+
 #define CQSPI_IS_ADDR(cmd_len)		(cmd_len > 1 ? 1 : 0)
 
 #define CQSPI_NO_DECODER_MAX_CS		4
 #define CQSPI_DECODER_MAX_CS		16
 #define CQSPI_READ_CAPTURE_MAX_DELAY	16
+#define CQSPI_PHY_DLL_MAX_DELAY 0x7f
 
 #define CQSPI_REG_POLL_US                       1 /* 1us */
 #define CQSPI_REG_RETRY                         10000
@@ -53,6 +59,7 @@
 #define CQSPI_REG_CONFIG_CHIPSELECT_LSB         10
 #define CQSPI_REG_CONFIG_BAUD_LSB               19
 #define CQSPI_REG_CONFIG_DTR_PROTO		BIT(24)
+#define CQSPI_REG_CONFIG_PIPELINE_PHY_EN_MASK   BIT(25)
 #define CQSPI_REG_CONFIG_DUAL_OPCODE		BIT(30)
 #define CQSPI_REG_CONFIG_IDLE_LSB               31
 #define CQSPI_REG_CONFIG_CHIPSELECT_MASK        0xF
@@ -89,9 +96,12 @@
 
 #define CQSPI_REG_RD_DATA_CAPTURE               0x10
 #define CQSPI_REG_RD_DATA_CAPTURE_BYPASS        BIT(0)
+#define CQSPI_REG_RD_DATA_CAPTURE_SAMPLE_EDGE   BIT(5)
 #define CQSPI_REG_READCAPTURE_DQS_ENABLE        BIT(8)
 #define CQSPI_REG_RD_DATA_CAPTURE_DELAY_LSB     1
 #define CQSPI_REG_RD_DATA_CAPTURE_DELAY_MASK    0xF
+#define CQSPI_REG_RD_DATA_CAPTURE_DDR_DELAY_LSB 16
+#define CQSPI_REG_RD_DATA_CAPTURE_DDR_DELAY_MASK 0xF
 
 #define CQSPI_REG_SIZE                          0x14
 #define CQSPI_REG_SIZE_ADDRESS_LSB              0
@@ -169,6 +179,12 @@
 
 #define CQSPI_REG_PHY_CONFIG                    0xB4
 #define CQSPI_REG_PHY_CONFIG_RESET_FLD_MASK     0x40000000
+#define CQSPI_REG_PHY_CONFIG_RXDLY_MSK		0x7Fu
+#define CQSPI_REG_PHY_CONFIG_TXDLY_MSK		0x7Fu
+#define CQSPI_REG_PHY_CONFIG_RXDLY_LSB		0
+#define CQSPI_REG_PHY_CONFIG_TXDLY_LSB		16
+#define CQSPI_REG_PHY_CONFIG_RXBYP		BIT(29)
+#define CQSPI_REG_PHY_CONFIG_RESYNC		BIT(31)
 
 #define CQSPI_DMA_DST_ADDR_REG                  0x1800
 #define CQSPI_DMA_DST_SIZE_REG                  0x1804
@@ -204,7 +220,6 @@
 	CQSPI_REG_SDRAMLEVEL_WR_LSB) & CQSPI_REG_SDRAMLEVEL_WR_MASK)
 
 struct cadence_spi_plat {
-	unsigned int	max_hz;
 	void		*regbase;
 	void		*ahbbase;
 	bool		is_decoded_cs;
@@ -213,10 +228,15 @@ struct cadence_spi_plat {
 	u32		trigger_address;
 	fdt_addr_t	ahbsize;
 	bool		use_dac_mode;
-	int		read_delay;
-	int		max_read_delay;
+	bool		phy_support;
+	bool		slow_phy_tx;
+	u32		max_read_delay;
 
-	/* Flash parameters */
+	bool		is_dma;
+
+	/* Per-flash parameters */
+	unsigned int	calib_hz;
+
 	u32		page_size;
 	u32		block_size;
 	u32		tshsl_ns;
@@ -224,7 +244,13 @@ struct cadence_spi_plat {
 	u32		tchsh_ns;
 	u32		tslch_ns;
 
-	bool		is_dma;
+	bool		calib_cfg;
+	u32		read_delay;
+	bool		use_dqs;
+	bool		use_phy;
+	u32		phyrxdly;
+	u32		phytxdly;
+	/* End per-flash parameters */
 };
 
 struct cadence_spi_priv;
@@ -237,8 +263,10 @@ struct cadence_drv_ops {
 };
 
 struct cadence_spi_priv {
+	uint		req_hz;
+	struct cadence_spi_plat *plat;
+
 	unsigned int	ref_clk_hz;
-	unsigned int	max_hz;
 	void		*regbase;
 	void		*ahbbase;
 	unsigned int	fifo_depth;
@@ -256,24 +284,22 @@ struct cadence_spi_priv {
 	struct cadence_drv_ops ops;
 
 	int		qspi_is_init;
-	unsigned int	qspi_calibrated_hz;
 	unsigned int	qspi_calibrated_cs;
-	unsigned int	previous_hz;
 	u32		wr_delay;
-	int		read_delay;
-	int		max_read_delay;
 
 	struct reset_ctl_bulk *resets;
-	u32		page_size;
-	u32		block_size;
-	u32		tshsl_ns;
-	u32		tsd2d_ns;
-	u32		tchsh_ns;
-	u32		tslch_ns;
-	u8		edge_mode;
-	u8		dll_mode;
-	bool		extra_dummy;
-	bool		ddr_init;
+
+	/* Flash parameters */
+	unsigned int	qspi_calibrated_hz;
+	u32		read_delay;
+
+#if !CONFIG_IS_ENABLED(SPI_FLASH_HS_CALIB)
+	unsigned int	chipid;
+#endif
+	u32		phyrxdly;
+	u32		phytxdly;
+	/* End Flash parameters */
+
 	bool		is_decoded_cs;
 	bool		use_dac_mode;
 	bool		is_dma;
@@ -289,7 +315,10 @@ void cadence_qspi_apb_controller_init(struct cadence_spi_priv *priv);
 void cadence_qspi_apb_controller_enable(void *reg_base_addr);
 void cadence_qspi_apb_controller_disable(void *reg_base_addr);
 void cadence_qspi_apb_dac_mode_enable(void *reg_base);
-
+void cadence_qspi_apb_enable_phy(void *reg_base, bool enbl);
+void cadence_qspi_apb_set_phy_cfg(void *reg_base,
+				  u32 rxdly, u32 txdly);
+void cadence_spi_update_speed(struct udevice *bus, bool calibrated);
 int cadence_qspi_apb_command_read_setup(struct cadence_spi_priv *priv,
 					const struct spi_mem_op *op);
 int cadence_qspi_apb_command_read(struct cadence_spi_priv *priv,
@@ -318,8 +347,8 @@ void cadence_qspi_apb_delay(void *reg_base,
 	unsigned int tshsl_ns, unsigned int tsd2d_ns,
 	unsigned int tchsh_ns, unsigned int tslch_ns);
 void cadence_qspi_apb_enter_xip(void *reg_base, char xip_dummy);
-void cadence_qspi_apb_readdata_capture(void *reg_base,
-	unsigned int bypass, unsigned int delay);
+void cadence_qspi_apb_readdata_capture(const struct cadence_spi_priv *priv,
+				       unsigned int bypass, unsigned int delay);
 unsigned int cm_get_qspi_controller_clk_hz(void);
 int cadence_qspi_apb_dma_read(struct cadence_spi_priv *priv,
 			      const struct spi_mem_op *op);
@@ -328,6 +357,8 @@ int cadence_qspi_apb_exec_flash_cmd(void *reg_base, unsigned int reg);
 int cadence_qspi_versal_flash_reset(struct udevice *dev);
 ofnode cadence_qspi_get_subnode(struct udevice *dev);
 void cadence_qspi_apb_enable_linear_mode(bool enable);
+int cadence_qspi_apb_phy_calibrate(struct spi_slave *slave,
+				   int (*test_read_fn)(struct spi_slave *));
 
 int cadence_qspi_apb_read_copy_mdma(struct cadence_spi_priv *priv,
 				    void *dst, u64 src, size_t len);

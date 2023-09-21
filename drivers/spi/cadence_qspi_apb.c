@@ -69,6 +69,284 @@ void cadence_qspi_apb_dac_mode_enable(void *reg_base)
 	writel(reg, reg_base + CQSPI_REG_CONFIG);
 }
 
+void cadence_qspi_apb_enable_phy(void *reg_base, bool enbl)
+{
+	u32 reg;
+
+	reg = readl(reg_base + CQSPI_REG_CONFIG);
+	if (enbl)
+		reg |= CQSPI_REG_CONFIG_PHY_ENABLE_MASK
+			| CQSPI_REG_CONFIG_PIPELINE_PHY_EN_MASK;
+	else
+		reg &= ~(CQSPI_REG_CONFIG_PHY_ENABLE_MASK
+			| CQSPI_REG_CONFIG_PIPELINE_PHY_EN_MASK);
+	writel(reg, reg_base + CQSPI_REG_CONFIG);
+}
+
+void cadence_qspi_apb_set_phy_cfg(void *reg_base,
+				  u32 rxdly, u32 txdly)
+{
+	u32 reg;
+
+	reg = readl(reg_base + CQSPI_REG_PHY_CONFIG);
+	reg &= ~(CQSPI_REG_PHY_CONFIG_RESYNC
+		| (CQSPI_REG_PHY_CONFIG_RXDLY_MSK
+			<< CQSPI_REG_PHY_CONFIG_RXDLY_LSB)
+		| (CQSPI_REG_PHY_CONFIG_TXDLY_MSK
+			<< CQSPI_REG_PHY_CONFIG_TXDLY_LSB));
+	reg |= ((rxdly & CQSPI_REG_PHY_CONFIG_RXDLY_MSK)
+			<< CQSPI_REG_PHY_CONFIG_RXDLY_LSB)
+		| ((txdly & CQSPI_REG_PHY_CONFIG_TXDLY_MSK)
+			<< CQSPI_REG_PHY_CONFIG_TXDLY_LSB)
+		| CQSPI_REG_PHY_CONFIG_RXBYP;
+	writel(reg, reg_base + CQSPI_REG_PHY_CONFIG);
+
+	reg = readl(reg_base + CQSPI_REG_PHY_CONFIG);
+	reg |= CQSPI_REG_PHY_CONFIG_RESYNC;
+	writel(reg, reg_base + CQSPI_REG_PHY_CONFIG);
+}
+
+void cadence_qspi_apb_readdata_capture(const struct cadence_spi_priv *priv,
+				       unsigned int bypass, unsigned int delay)
+{
+	void *reg_base = priv->regbase;
+	unsigned int reg;
+
+	cadence_qspi_apb_controller_disable(reg_base);
+	reg = readl(reg_base + CQSPI_REG_RD_DATA_CAPTURE);
+
+	if (bypass)
+		reg |= CQSPI_REG_RD_DATA_CAPTURE_BYPASS;
+	else
+		reg &= ~CQSPI_REG_RD_DATA_CAPTURE_BYPASS;
+
+	reg &= ~(CQSPI_REG_RD_DATA_CAPTURE_DELAY_MASK
+		<< CQSPI_REG_RD_DATA_CAPTURE_DELAY_LSB);
+
+	reg |= (delay & CQSPI_REG_RD_DATA_CAPTURE_DELAY_MASK)
+		<< CQSPI_REG_RD_DATA_CAPTURE_DELAY_LSB;
+
+	if (priv->plat->phy_support) {
+		if (priv->plat->use_dqs)
+			reg |= CQSPI_REG_READCAPTURE_DQS_ENABLE;
+		else
+			reg &= ~CQSPI_REG_READCAPTURE_DQS_ENABLE;
+	}
+
+	writel(reg, reg_base + CQSPI_REG_RD_DATA_CAPTURE);
+
+	cadence_qspi_apb_controller_enable(reg_base);
+}
+
+#if CONFIG_IS_ENABLED(SPI_FLASH_HS_CALIB)
+/**
+ * This algorithm was implemented based on the Analog Devices application note
+ * EE-437: "OSPI PHY Configuration and Training".
+ *
+ * Algorithm breif:
+ * * Set Read Delay Capture, TX DLL delay, and RX DLL delay to 0.
+ * * Iterate over RDC, TXdly and RXdly until the first valid configuration is
+ *   found.
+ * * Keep this RDC value. Scan all TXdly values for the range of valid values
+ *   and pick the middle value.
+ * * If data strobe signal (DQS) is used, use the first valid RXdly value, +1.
+ * * If DQS is not used, scan all RXdly for the range of valid values and pick
+ *   the middle value.
+ * * Configurations are considered valid if they pass for at least 2
+ *   consecutive iterations.
+ *
+ * The caller is responsible for providing the function to test
+ * if a configuration is valid.
+ *
+ * Returns 0 on success, negative error code.
+ */
+int cadence_qspi_apb_phy_calibrate(struct spi_slave *slave,
+				   int (*test_read_fn)(struct spi_slave *))
+{
+	struct udevice *bus = slave->dev->parent;
+	struct cadence_spi_priv *priv = dev_get_priv(bus);
+	struct cadence_spi_plat *plat = dev_get_plat(bus);
+	void * const reg_base = priv->regbase;
+	int err = 0;
+	const bool dqs = plat->use_dqs;
+	int fast = 1;
+
+	int rdcd;
+	int txvalid_count;
+	int rxvalid_count;
+
+	int first_txdly_valid;
+	int last_txdly_valid;
+	int first_rxdly_valid;
+	int last_rxdly_valid;
+
+	int txdly;
+	int rxdly;
+
+	int txdly_step;
+	int rxdly_step;
+	int txpass_limit;
+	int rxpass_limit;
+
+	if (priv->req_hz != priv->ref_clk_hz) {
+		debug("%s: phy mode must operate at ref_clk speed.", __func__);
+		err = -EINVAL;
+		goto out;
+	}
+
+	cadence_spi_update_speed(bus, true);
+
+try_again_slow:
+	if (fast) {
+		txdly_step = 4;
+		rxdly_step = 4;
+		txpass_limit = 16;
+		rxpass_limit = 16;
+	} else {
+		txdly_step = 1;
+		rxdly_step = 1;
+		txpass_limit = 128;
+		rxpass_limit = 128;
+	}
+
+	first_txdly_valid = -1;
+	last_txdly_valid = -1;
+
+	for (rdcd = 0; rdcd < plat->max_read_delay; ++rdcd) {
+		cadence_qspi_apb_readdata_capture(priv, 1, rdcd);
+
+		txvalid_count = 0;
+		for (txdly = 0; txdly < CQSPI_PHY_DLL_MAX_DELAY;
+				txdly += txdly_step) {
+			rxvalid_count = 0;
+			for (rxdly = 0; rxdly < CQSPI_PHY_DLL_MAX_DELAY;
+					rxdly += rxdly_step) {
+				cadence_qspi_apb_set_phy_cfg(reg_base,
+							     rxdly, txdly);
+				err = test_read_fn(slave);
+				if (err < 0) {
+					goto out;
+				} else if (!err) {
+					++rxvalid_count;
+
+					if (rxvalid_count == 2)
+						++txvalid_count;
+
+					/* Check for enough passing cfgs
+					 * With DQS, only 2 need to pass.
+					 */
+					if (dqs && rxvalid_count >= 2)
+						break;
+					else if (!dqs && (rxvalid_count >=
+							  rxpass_limit))
+						break;
+				} else if (rxvalid_count == 1) {
+					//must be consecutive to be valid
+					rxvalid_count = 0;
+				} else if (rxvalid_count >= 2) {
+					break; //end of valid range
+				}
+			}
+
+			if (rxvalid_count >= 2) {
+				if (first_txdly_valid < 0)
+					first_txdly_valid = txdly;
+				last_txdly_valid = txdly;
+			}
+
+			if (txvalid_count >= txpass_limit)
+				break;
+			else if (txvalid_count && !rxvalid_count)
+				break;
+		}
+		if (first_txdly_valid >= 0)
+			break;
+	}
+
+	if (first_txdly_valid < 0 || last_txdly_valid < 0) {
+		if (fast) {
+			fast = 0;
+			goto try_again_slow;
+		} else {
+			goto out;
+		}
+	}
+
+	txdly = (first_txdly_valid + last_txdly_valid) / 2;
+
+	rxvalid_count = 0;
+	first_rxdly_valid = -1;
+	last_rxdly_valid = -1;
+	for (rxdly = 0; rxdly < CQSPI_PHY_DLL_MAX_DELAY;
+			rxdly += rxdly_step) {
+		cadence_qspi_apb_set_phy_cfg(reg_base, rxdly, txdly);
+		err = test_read_fn(slave);
+		if (err < 0) {
+			goto out;
+		} else if (!err) {
+			++rxvalid_count;
+
+			if (first_rxdly_valid < 0)
+				first_rxdly_valid = rxdly;
+			last_rxdly_valid = rxdly;
+
+			//check if we have enough passing configurations
+			if (dqs && rxvalid_count >= 2)
+				break;
+			else if (!dqs && (rxvalid_count >= rxpass_limit))
+				break;
+		} else if (rxvalid_count == 1) {
+			//must be consecutive to be valid
+			rxvalid_count = 0;
+			first_rxdly_valid = -1;
+			last_rxdly_valid = -1;
+		} else if (rxvalid_count >= 2) {
+			break; //end of valid range
+		}
+	}
+
+	if (first_rxdly_valid < 0 || last_rxdly_valid < 0) {
+		if (fast) {
+			fast = 0;
+			goto try_again_slow;
+		} else {
+			goto out;
+		}
+	}
+
+	if (dqs)
+		rxdly = first_rxdly_valid + 1;
+	else
+		rxdly = (first_rxdly_valid + last_rxdly_valid) / 2;
+
+	cadence_qspi_apb_set_phy_cfg(reg_base, rxdly, txdly);
+	err = test_read_fn(slave);
+	if (err < 0) {
+		goto out;
+	} else if (err) {
+		if (fast) {
+			fast = 0;
+			goto try_again_slow;
+		} else {
+			goto out;
+		}
+	}
+
+	priv->phyrxdly = rxdly;
+	priv->phytxdly = txdly;
+	priv->read_delay = rdcd;
+
+	debug("%s: read-delay=%u phyrxdly=%u phytxdly=%u\n",
+	      __func__, rdcd, rxdly, txdly);
+
+	return 0;
+
+out:
+	cadence_spi_update_speed(bus, false);
+	return err;
+}
+#endif
+
 static unsigned int cadence_qspi_calc_dummy(const struct spi_mem_op *op,
 					    bool dtr)
 {
@@ -165,30 +443,6 @@ static unsigned int cadence_qspi_wait_idle(void *reg_base)
 	return 0;
 }
 
-void cadence_qspi_apb_readdata_capture(void *reg_base,
-				unsigned int bypass, unsigned int delay)
-{
-	unsigned int reg;
-	cadence_qspi_apb_controller_disable(reg_base);
-
-	reg = readl(reg_base + CQSPI_REG_RD_DATA_CAPTURE);
-
-	if (bypass)
-		reg |= CQSPI_REG_RD_DATA_CAPTURE_BYPASS;
-	else
-		reg &= ~CQSPI_REG_RD_DATA_CAPTURE_BYPASS;
-
-	reg &= ~(CQSPI_REG_RD_DATA_CAPTURE_DELAY_MASK
-		<< CQSPI_REG_RD_DATA_CAPTURE_DELAY_LSB);
-
-	reg |= (delay & CQSPI_REG_RD_DATA_CAPTURE_DELAY_MASK)
-		<< CQSPI_REG_RD_DATA_CAPTURE_DELAY_LSB;
-
-	writel(reg, reg_base + CQSPI_REG_RD_DATA_CAPTURE);
-
-	cadence_qspi_apb_controller_enable(reg_base);
-}
-
 void cadence_qspi_apb_config_baudrate_div(void *reg_base,
 	unsigned int ref_clk_hz, unsigned int sclk_hz)
 {
@@ -210,8 +464,13 @@ void cadence_qspi_apb_config_baudrate_div(void *reg_base,
 	if (div > CQSPI_REG_CONFIG_BAUD_MASK)
 		div = CQSPI_REG_CONFIG_BAUD_MASK;
 
-	debug("%s: ref_clk %dHz sclk %dHz Div 0x%x, actual %dHz\n", __func__,
-	      ref_clk_hz, sclk_hz, div, ref_clk_hz / (2 * (div + 1)));
+	debug("%s: ref_clk %dHz sclk %dHz Div 0x%x, %s %dHz\n", __func__,
+	      ref_clk_hz, sclk_hz, div,
+	      (readl(reg_base + CQSPI_REG_CONFIG) &
+	       CQSPI_REG_CONFIG_PHY_ENABLE_MASK) ? "PHY" : "actual",
+	      (readl(reg_base + CQSPI_REG_CONFIG) &
+	       CQSPI_REG_CONFIG_PHY_ENABLE_MASK) ?
+	       ref_clk_hz : ref_clk_hz / (2 * (div + 1)));
 
 	reg |= (div << CQSPI_REG_CONFIG_BAUD_LSB);
 	writel(reg, reg_base + CQSPI_REG_CONFIG);
@@ -323,8 +582,8 @@ void cadence_qspi_apb_controller_init(struct cadence_spi_priv *priv)
 	/* Clear the previous value */
 	reg &= ~(CQSPI_REG_SIZE_PAGE_MASK << CQSPI_REG_SIZE_PAGE_LSB);
 	reg &= ~(CQSPI_REG_SIZE_BLOCK_MASK << CQSPI_REG_SIZE_BLOCK_LSB);
-	reg |= (priv->page_size << CQSPI_REG_SIZE_PAGE_LSB);
-	reg |= (priv->block_size << CQSPI_REG_SIZE_BLOCK_LSB);
+	reg |= (priv->plat->page_size << CQSPI_REG_SIZE_PAGE_LSB);
+	reg |= (priv->plat->block_size << CQSPI_REG_SIZE_BLOCK_LSB);
 	writel(reg, priv->regbase + CQSPI_REG_SIZE);
 
 	/* Configure the remap address register, no remap */
@@ -876,7 +1135,7 @@ static int
 cadence_qspi_apb_indirect_write_execute(struct cadence_spi_priv *priv,
 					unsigned int n_tx, const u8 *txbuf)
 {
-	unsigned int page_size = priv->page_size;
+	unsigned int page_size = priv->plat->page_size;
 	unsigned int remaining = n_tx;
 	const u8 *bb_txbuf = txbuf;
 	void *bounce_buf = NULL;
@@ -967,13 +1226,23 @@ int cadence_qspi_apb_write_execute(struct cadence_spi_priv *priv,
 	u32 to = op->addr.val;
 	const void *buf = op->data.buf.out;
 	size_t len = op->data.nbytes;
+	u32 cfg;
 	int retval = 0;
 
 	cadence_qspi_apb_enable_linear_mode(true);
 	if (op->addr.nbytes && priv->use_dac_mode && (to + len < priv->ahbsize)) {
+		cfg = readl(priv->regbase + CQSPI_REG_CONFIG);
+		if (priv->plat->slow_phy_tx && (cfg & CQSPI_REG_CONFIG_PHY_ENABLE_MASK))
+			writel(cfg & ~(CQSPI_REG_CONFIG_PHY_ENABLE_MASK),
+			       priv->regbase + CQSPI_REG_CONFIG);
+
 		retval = priv->ops.direct_write_copy(priv, buf, to, len);
+
 		if (!cadence_qspi_wait_idle(priv->regbase))
 			retval = -EIO;
+
+		writel(cfg, priv->regbase + CQSPI_REG_CONFIG);
+
 		return retval;
 	}
 
