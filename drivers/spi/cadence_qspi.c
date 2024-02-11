@@ -6,6 +6,8 @@
 
 #include <clk.h>
 #include <log.h>
+#include <asm-generic/io.h>
+#include <dma.h>
 #include <dm.h>
 #include <fdtdec.h>
 #include <malloc.h>
@@ -193,6 +195,42 @@ static int cadence_spi_set_speed(struct udevice *bus, uint hz)
 	return 0;
 }
 
+#if CONFIG_IS_ENABLED(DMA_CHANNELS)
+static int cadence_spi_probe_dma(struct udevice *bus)
+{
+	struct cadence_spi_priv *priv = dev_get_priv(bus);
+	struct dma_dev_priv *dma_uc;
+	int hasdma;
+	int ret;
+
+	hasdma = (ofnode_read_u32(dev_ofnode(bus), "dmas", NULL) == 0) &&
+		 (ofnode_read_u32(dev_ofnode(bus), "dma-names", NULL) == 0);
+	if (!hasdma)
+		return 0;
+
+	ret = dma_get_by_name(bus, "dst", &priv->dstdma);
+	if (ret != 0)
+		return 0;
+
+	dma_uc = dev_get_uclass_priv(priv->dstdma.dev);
+
+	if (dma_uc->supported == DMA_SUPPORTS_MEM_TO_MEM) {
+		/* We were given a specific DMA channel that only
+		 * supports mem-to-mem transactions.
+		 */
+		priv->hasdma = hasdma;
+		priv->ops.direct_read_copy = cadence_qspi_apb_read_copy_mdma;
+		priv->ops.direct_write_copy = cadence_qspi_apb_write_copy_mdma;
+		return 0;
+	}
+
+	/* Todo: Implement device DMA channel modes when needed
+	 * (DMA_SUPPORTS_MEM_TO_DEV, DMA_SUPPORTS_DEV_TO_MEM).
+	 */
+	return -ENOSYS;
+}
+#endif
+
 static int cadence_spi_probe(struct udevice *bus)
 {
 	struct cadence_spi_plat *plat = dev_get_plat(bus);
@@ -217,6 +255,9 @@ static int cadence_spi_probe(struct udevice *bus)
 	priv->tsd2d_ns		= plat->tsd2d_ns;
 	priv->tchsh_ns		= plat->tchsh_ns;
 	priv->tslch_ns		= plat->tslch_ns;
+
+	priv->ops.direct_read_copy = cadence_qspi_apb_direct_read_copy;
+	priv->ops.direct_write_copy = cadence_qspi_apb_direct_write_copy;
 
 	if (IS_ENABLED(CONFIG_ZYNQMP_FIRMWARE))
 		xilinx_pm_request(PM_REQUEST_NODE, PM_DEV_OSPI,
@@ -250,6 +291,12 @@ static int cadence_spi_probe(struct udevice *bus)
 	}
 
 	priv->wr_delay = 50 * DIV_ROUND_UP(NSEC_PER_SEC, priv->ref_clk_hz);
+
+	if (CONFIG_IS_ENABLED(DMA_CHANNELS)) {
+		ret = cadence_spi_probe_dma(bus);
+		if (ret)
+			return ret;
+	}
 
 	/* Versal and Versal-NET use spi calibration to set read delay */
 	if (CONFIG_IS_ENABLED(ARCH_VERSAL) ||

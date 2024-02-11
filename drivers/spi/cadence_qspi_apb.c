@@ -28,9 +28,11 @@
 #include <log.h>
 #include <asm/io.h>
 #include <dma.h>
+#include <dma-uclass.h>
 #include <linux/bitops.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
+#include <linux/dma-mapping.h>
 #include <wait_bit.h>
 #include <spi.h>
 #include <spi-mem.h>
@@ -780,17 +782,15 @@ int cadence_qspi_apb_read_execute(struct cadence_spi_priv *priv,
 	u64 from = op->addr.val;
 	void *buf = op->data.buf.in;
 	size_t len = op->data.nbytes;
+	int retval = 0;
 
 	cadence_qspi_apb_enable_linear_mode(true);
 
 	if (op->addr.nbytes && priv->use_dac_mode && (from + len < priv->ahbsize)) {
-		if (len < 256 ||
-		    dma_memcpy(buf, priv->ahbbase + from, len) < 0) {
-			memcpy_fromio(buf, priv->ahbbase + from, len);
-		}
+		retval = priv->ops.direct_read_copy(priv, buf, from, len);
 		if (!cadence_qspi_wait_idle(priv->regbase))
-			return -EIO;
-		return 0;
+			retval = -EIO;
+		return retval;
 	}
 
 	return cadence_qspi_apb_indirect_read_execute(priv, len, buf);
@@ -967,13 +967,14 @@ int cadence_qspi_apb_write_execute(struct cadence_spi_priv *priv,
 	u32 to = op->addr.val;
 	const void *buf = op->data.buf.out;
 	size_t len = op->data.nbytes;
+	int retval = 0;
 
 	cadence_qspi_apb_enable_linear_mode(true);
 	if (op->addr.nbytes && priv->use_dac_mode && (to + len < priv->ahbsize)) {
-		memcpy_toio(priv->ahbbase + to, buf, len);
+		retval = priv->ops.direct_write_copy(priv, buf, to, len);
 		if (!cadence_qspi_wait_idle(priv->regbase))
-			return -EIO;
-		return 0;
+			retval = -EIO;
+		return retval;
 	}
 
 	return cadence_qspi_apb_indirect_write_execute(priv, len, buf);
@@ -997,4 +998,84 @@ void cadence_qspi_apb_enter_xip(void *reg_base, char xip_dummy)
 	reg = readl(reg_base + CQSPI_REG_RD_INSTR);
 	reg |= (1 << CQSPI_REG_RD_INSTR_MODE_EN_LSB);
 	writel(reg, reg_base + CQSPI_REG_RD_INSTR);
+}
+
+#if CONFIG_IS_ENABLED(DMA_CHANNELS)
+static int cadence_qspi_apb_copy_mdma(struct udevice *dmadev,
+				      void *dst, void *src, size_t len)
+{
+	struct dma_ops *ops = (struct dma_ops *)dmadev->driver->ops;
+
+	/* Some transfers might not be aligned to cache boundaries. Align them
+	 * for the cache operation while preserving the original transfer
+	 * address.
+	 */
+	uintptr_t algn_dst_l = ((uintptr_t)dst / ARCH_DMA_MINALIGN) *
+				ARCH_DMA_MINALIGN;
+	uintptr_t algn_dst_h = ALIGN((uintptr_t)dst + len, ARCH_DMA_MINALIGN);
+	uintptr_t algn_src_l = ((uintptr_t)src / ARCH_DMA_MINALIGN) *
+				ARCH_DMA_MINALIGN;
+	uintptr_t algn_src_h = ALIGN((uintptr_t)src + len, ARCH_DMA_MINALIGN);
+	uintptr_t algn_len = max(algn_dst_h - algn_dst_l,
+				 algn_src_h - algn_src_l);
+
+	dma_addr_t dst_map = dma_map_single((void *)algn_dst_l, algn_len,
+					    DMA_FROM_DEVICE);
+	dma_addr_t src_map = dma_map_single((void *)algn_src_l, algn_len,
+					    DMA_TO_DEVICE);
+
+	uintptr_t dma_dst = dst_map + ((uintptr_t)dst - algn_dst_l);
+	uintptr_t dma_src = src_map + ((uintptr_t)src - algn_src_l);
+
+	int ret = ops->transfer(dmadev, DMA_MEM_TO_MEM, dma_dst, dma_src, len);
+
+	dma_unmap_single(dst_map,  algn_len, DMA_FROM_DEVICE);
+	dma_unmap_single(src_map, algn_len, DMA_TO_DEVICE);
+
+	return ret;
+}
+
+int cadence_qspi_apb_read_copy_mdma(struct cadence_spi_priv *priv,
+				    void *dst, u64 src, size_t len)
+{
+	return cadence_qspi_apb_copy_mdma(priv->dstdma.dev, dst,
+					  priv->ahbbase + src, len);
+}
+
+int cadence_qspi_apb_write_copy_mdma(struct cadence_spi_priv *priv,
+				     const void *src, u64 dst, size_t len)
+{
+	return cadence_qspi_apb_copy_mdma(priv->dstdma.dev,
+					  priv->ahbbase + dst,
+					  (void *)src, len);
+}
+#else
+int cadence_qspi_apb_read_copy_mdma(struct cadence_spi_priv *priv,
+				    void *dst, u64 src, size_t len)
+{
+	return -ENOSYS;
+}
+
+int cadence_qspi_apb_write_copy_mdma(struct cadence_spi_priv *priv,
+				     const void *src, u64 dst, size_t len)
+{
+	return -ENOSYS;
+}
+#endif
+
+int cadence_qspi_apb_direct_read_copy(struct cadence_spi_priv *priv,
+				      void *dst, u64 src, size_t len)
+{
+	if (len < 256 ||
+	    dma_memcpy(dst, priv->ahbbase + src, len) < 0) {
+		memcpy_fromio(dst, priv->ahbbase + src, len);
+	}
+	return 0;
+}
+
+int cadence_qspi_apb_direct_write_copy(struct cadence_spi_priv *priv,
+				       const void *src, u64 dst, size_t len)
+{
+	memcpy_toio(priv->ahbbase + dst, src, len);
+	return 0;
 }

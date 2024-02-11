@@ -223,7 +223,16 @@ struct cadence_spi_plat {
 	u32		tchsh_ns;
 	u32		tslch_ns;
 
-	bool            is_dma;
+	bool		is_dma;
+};
+
+struct cadence_spi_priv;
+
+struct cadence_drv_ops {
+	int (*direct_read_copy)(struct cadence_spi_priv *priv,
+				void *dst, u64 src, size_t len);
+	int (*direct_write_copy)(struct cadence_spi_priv *priv,
+				 const void *src, u64 dst, size_t len);
 };
 
 struct cadence_spi_priv {
@@ -234,10 +243,16 @@ struct cadence_spi_priv {
 	unsigned int	fifo_depth;
 	unsigned int	fifo_width;
 	unsigned int	trigger_address;
-	fdt_addr_t      ahbsize;
+	fdt_addr_t	ahbsize;
 	size_t		cmd_len;
 	u8		cmd_buf[32];
 	size_t		data_len;
+
+	bool		hasdma;
+#if CONFIG_IS_ENABLED(DMA_CHANNELS)
+	struct dma	dstdma;
+#endif
+	struct cadence_drv_ops ops;
 
 	int		qspi_is_init;
 	unsigned int	qspi_calibrated_hz;
@@ -253,8 +268,8 @@ struct cadence_spi_priv {
 	u32		tsd2d_ns;
 	u32		tchsh_ns;
 	u32		tslch_ns;
-	u8              edge_mode;
-	u8              dll_mode;
+	u8		edge_mode;
+	u8		dll_mode;
 	bool		extra_dummy;
 	bool		ddr_init;
 	bool		is_decoded_cs;
@@ -312,4 +327,12 @@ int cadence_qspi_versal_flash_reset(struct udevice *dev);
 ofnode cadence_qspi_get_subnode(struct udevice *dev);
 void cadence_qspi_apb_enable_linear_mode(bool enable);
 
+int cadence_qspi_apb_read_copy_mdma(struct cadence_spi_priv *priv,
+				    void *dst, u64 src, size_t len);
+int cadence_qspi_apb_write_copy_mdma(struct cadence_spi_priv *priv,
+				     const void *src, u64 dst, size_t len);
+int cadence_qspi_apb_direct_read_copy(struct cadence_spi_priv *priv,
+				      void *dst, u64 src, size_t len);
+int cadence_qspi_apb_direct_write_copy(struct cadence_spi_priv *priv,
+				       const void *src, u64 dst, size_t len);
 #endif /* __CADENCE_QSPI_H__ */
