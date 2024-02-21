@@ -29,3 +29,5 @@ connected flash properties
 			  select (n_ss_out).
 - cdns,tslch-ns		: Delay in master reference clocks between setting
 			  n_ss_out low and first bit transfer
+- cdns,max-read-delay	: Max safe value to use for the read capture delay
+			  during auto calibration.

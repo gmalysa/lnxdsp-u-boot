@@ -103,7 +103,7 @@ static int spi_calibration(struct udevice *bus, uint hz)
 
 	/* use back the intended clock and find low range */
 	cadence_spi_write_speed(bus, hz);
-	for (i = 0; i < CQSPI_READ_CAPTURE_MAX_DELAY; i++) {
+	for (i = 0; i < priv->max_read_delay; i++) {
 		/* Disable QSPI */
 		cadence_qspi_apb_controller_disable(base);
 
@@ -245,6 +245,7 @@ static int cadence_spi_probe(struct udevice *bus)
 	priv->fifo_depth	= plat->fifo_depth;
 	priv->fifo_width	= plat->fifo_width;
 	priv->trigger_address	= plat->trigger_address;
+	priv->max_read_delay	= plat->max_read_delay;
 	priv->read_delay	= plat->read_delay;
 	priv->ahbsize		= plat->ahbsize;
 	priv->max_hz		= plat->max_hz;
@@ -455,6 +456,10 @@ static int cadence_spi_of_to_plat(struct udevice *bus)
 
 	plat->is_dma = dev_read_bool(bus, "cdns,is-dma");
 
+	plat->max_read_delay = dev_read_u32_default(bus,
+						    "cdns,max-read-delay",
+						    CQSPI_READ_CAPTURE_MAX_DELAY);
+
 	/* All other parameters are embedded in the child node */
 	subnode = cadence_qspi_get_subnode(bus);
 	if (!ofnode_valid(subnode)) {
@@ -483,6 +488,8 @@ static int cadence_spi_of_to_plat(struct udevice *bus)
 	 */
 	plat->read_delay = ofnode_read_s32_default(subnode, "cdns,read-delay",
 						   -1);
+	if (plat->read_delay > plat->max_read_delay)
+		plat->read_delay = plat->max_read_delay;
 
 	debug("%s: regbase=%p ahbbase=%p max-frequency=%d page-size=%d\n",
 	      __func__, plat->regbase, plat->ahbbase, plat->max_hz,
