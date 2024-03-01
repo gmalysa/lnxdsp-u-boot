@@ -20,6 +20,14 @@ choice
 	  configurations. For the SOM-based devkits, both ezkit
 	  and ezlite variants are available.
 
+config TARGET_SC594_SOM_EZKIT
+	bool "Analog Devices SC594 SOM EZ Kit"
+	select SC59X
+
+config TARGET_SC594_SOM_EZLITE
+	bool "Analog Devices SC594 SOM EZ Lite"
+	select SC59X
+
 config TARGET_SC589_EZKIT
 	bool "Analog Devices SC589 EZ Kit"
 	select SC58X
@@ -503,5 +511,7 @@ source "board/adi/sc573-ezkit/Kconfig"
 source "board/adi/sc584-ezkit/Kconfig"
 source "board/adi/sc589-ezkit/Kconfig"
 source "board/adi/sc589-mini/Kconfig"
+source "board/adi/sc594-som-ezlite/Kconfig"
+source "board/adi/sc594-som-ezkit/Kconfig"
 
 endif
