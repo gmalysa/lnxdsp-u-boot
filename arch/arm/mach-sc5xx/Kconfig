@@ -20,6 +20,21 @@ choice
 	  configurations. For the SOM-based devkits, both ezkit
 	  and ezlite variants are available.
 
+config TARGET_SC589_EZKIT
+	bool "Analog Devices SC589 EZ Kit"
+	select SC58X
+	select ADI_USE_DMC1
+
+config TARGET_SC589_MINI
+	bool "Analog Devices SC589 Mini Kit"
+	select SC58X
+	select ADI_USE_DMC1
+
+config TARGET_SC584_EZKIT
+	bool "Analog Devices SC584 EZ Kit"
+	select SC58X
+	select ADI_USE_DDR2
+
 config TARGET_SC573_EZKIT
 	bool "Analog Devices SC573 EZ Kit"
 	select SC57X
@@ -485,5 +500,8 @@ config PINCTRL_ADI
 	default y
 
 source "board/adi/sc573-ezkit/Kconfig"
+source "board/adi/sc584-ezkit/Kconfig"
+source "board/adi/sc589-ezkit/Kconfig"
+source "board/adi/sc589-mini/Kconfig"
 
 endif
