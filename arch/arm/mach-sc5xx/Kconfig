@@ -13,6 +13,18 @@
 
 if ARCH_SC5XX
 
+choice
+	prompt "SC5xx board select"
+	help
+	  Select one of the Analog Devices SC5xx development kit
+	  configurations. For the SOM-based devkits, both ezkit
+	  and ezlite variants are available.
+
+config TARGET_SC573_EZKIT
+	bool "Analog Devices SC573 EZ Kit"
+	select SC57X
+endchoice
+
 config SC57X
 	bool
 	select SUPPORT_SPL
@@ -471,5 +483,7 @@ config ADI_GPIO
 config PINCTRL_ADI
 	bool
 	default y
+
+source "board/adi/sc573-ezkit/Kconfig"
 
 endif
