@@ -16,6 +16,7 @@
 #include <syscon.h>
 #include <dm/device_compat.h>
 #include <linux/delay.h>
+#include <linux/io.h>
 
 /* Register offsets */
 #ifdef CONFIG_SC58X
@@ -145,11 +146,11 @@ static int sharc_load(struct udevice *dev, ulong addr, ulong size)
 
 		if (!is_empty(block_hdr)) {
 			if (block_hdr->bcode_flag.bflag_fill) {
-				memset((void *)(phys_addr_t)block_hdr->target_addr,
+				memset_io((void *)(phys_addr_t)block_hdr->target_addr,
 				       block_hdr->argument,
 				       block_hdr->byte_count);
 			} else {
-				memcpy((void *)(phys_addr_t)block_hdr->target_addr,
+				memcpy_toio((void *)(phys_addr_t)block_hdr->target_addr,
 				       buf + sizeof(struct ldr_hdr),
 				       block_hdr->byte_count);
 			}
