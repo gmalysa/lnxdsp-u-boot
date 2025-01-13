@@ -7,14 +7,14 @@
  * Converted to driver model by Nathan Barrett-Morrison
  *
  * Contact: Nathan Barrett-Morrison <nathan.morrison@timesys.com>
- * Contact: Greg Malysa <greg.malysa@timesys.com>
+ * Contact: Greg Malysa <malysagreg@gmail.com>
  */
 
 #include <clk.h>
 #include <dm.h>
 #include <i2c.h>
 #include <mapmem.h>
-#include <asm/io.h>
+#include <linux/io.h>
 
 #define CLKLOW(x) ((x) & 0xFF)     // Periods Clock Is Held Low
 #define CLKHI(y) (((y) & 0xFF) << 0x8) // Periods Clock Is High
@@ -141,53 +141,47 @@ struct adi_i2c_dev {
  */
 static int wait_for_completion(struct twi_regs *twi, struct adi_i2c_msg *msg)
 {
-	u16 int_stat, ctl;
+	u16 int_stat;
 	ulong timebase = get_timer(0);
 
 	do {
-		int_stat = readw(&twi->int_stat);
+		int_stat = ioread16(&twi->int_stat);
 
 		if (int_stat & XMTSERV) {
-			writew(XMTSERV, &twi->int_stat);
+			iowrite16(XMTSERV, &twi->int_stat);
 			if (msg->olen) {
-				writew(*(msg->obuf++), &twi->xmt_data8);
+				iowrite16(*(msg->obuf++), &twi->xmt_data8);
 				--msg->olen;
 			} else if (!(msg->flags & I2C_M_COMBO) && msg->len) {
-				writew(*(msg->buf++), &twi->xmt_data8);
+				iowrite16(*(msg->buf++), &twi->xmt_data8);
 				--msg->len;
 			} else {
-				ctl = readw(&twi->master_ctl);
 				if (msg->flags & I2C_M_COMBO)
-					writew(ctl | RSTART | MDIR,
-					       &twi->master_ctl);
+					setbits_16(&twi->master_ctl, RSTART | MDIR);
 				else
-					writew(ctl | STOP, &twi->master_ctl);
+					setbits_16(&twi->master_ctl, STOP);
 			}
 		}
 		if (int_stat & RCVSERV) {
-			writew(RCVSERV, &twi->int_stat);
+			iowrite16(RCVSERV, &twi->int_stat);
 			if (msg->len) {
-				*(msg->buf++) = readw(&twi->rcv_data8);
+				*(msg->buf++) = ioread16(&twi->rcv_data8);
 				--msg->len;
 			} else if (msg->flags & I2C_M_STOP) {
-				ctl = readw(&twi->master_ctl);
-				writew(ctl | STOP, &twi->master_ctl);
+				setbits_16(&twi->master_ctl, STOP);
 			}
 		}
 		if (int_stat & MERR) {
 			pr_err("%s: master transmit terror: %d\n", __func__,
-			       readw(&twi->master_stat));
-			writew(MERR, &twi->int_stat);
+			       ioread16(&twi->master_stat));
+			iowrite16(MERR, &twi->int_stat);
 			return -EIO;
 		}
 		if (int_stat & MCOMP) {
-			writew(MCOMP, &twi->int_stat);
+			iowrite16(MCOMP, &twi->int_stat);
 			if (msg->flags & I2C_M_COMBO && msg->len) {
-				ctl = readw(&twi->master_ctl);
-				ctl = (ctl & ~RSTART) |
-					(min((unsigned int)msg->len,
-					     0xffU) << 6) | MEN | MDIR;
-				writew(ctl, &twi->master_ctl);
+				u16 mlen = min(msg->len, 0xffu) << 6;
+				clrsetbits_16(&twi->master_ctl, RSTART, mlen | MEN | MDIR);
 			} else {
 				break;
 			}
@@ -217,47 +211,44 @@ static int i2c_transfer(struct twi_regs *twi, u8 chip, u8 *offset,
 	};
 
 	/* wait for things to settle */
-	while (readw(&twi->master_stat) & BUSBUSY)
+	while (ioread16(&twi->master_stat) & BUSBUSY)
 		if (!IS_ENABLED(CONFIG_SPL_BUILD) && ctrlc())
 			return -EINTR;
 
 	/* Set Transmit device address */
-	writew(chip, &twi->master_addr);
+	iowrite16(chip, &twi->master_addr);
 
 	/* Clear the FIFO before starting things */
-	writew(XMTFLUSH | RCVFLUSH, &twi->fifo_ctl);
-	writew(0, &twi->fifo_ctl);
+	iowrite16(XMTFLUSH | RCVFLUSH, &twi->fifo_ctl);
+	iowrite16(0, &twi->fifo_ctl);
 
 	/* Prime the pump */
 	if (msg.olen) {
 		len = (msg.flags & I2C_M_COMBO) ? msg.olen : msg.olen + len;
-		writew(*(msg.obuf++), &twi->xmt_data8);
+		iowrite16(*(msg.obuf++), &twi->xmt_data8);
 		--msg.olen;
 	} else if (!(msg.flags & I2C_M_READ) && msg.len) {
-		writew(*(msg.buf++), &twi->xmt_data8);
+		iowrite16(*(msg.buf++), &twi->xmt_data8);
 		--msg.len;
 	}
 
 	/* clear int stat */
-	writew(-1, &twi->master_stat);
-	writew(-1, &twi->int_stat);
-	writew(0, &twi->int_mask);
+	iowrite16(-1, &twi->master_stat);
+	iowrite16(-1, &twi->int_stat);
+	iowrite16(0, &twi->int_mask);
 
 	/* Master enable */
-	ctl = readw(&twi->master_ctl);
+	ctl = ioread16(&twi->master_ctl);
 	ctl = (ctl & FAST) | (min(len, 0xff) << 6) | MEN |
 		((msg.flags & I2C_M_READ) ? MDIR : 0);
-	writew(ctl, &twi->master_ctl);
+	iowrite16(ctl, &twi->master_ctl);
 
 	/* Process the rest */
 	ret = wait_for_completion(twi, &msg);
 
-	ctl = readw(&twi->master_ctl) & ~MEN;
-	writew(ctl, &twi->master_ctl);
-	ctl = readw(&twi->control) & ~TWI_ENA;
-	writew(ctl, &twi->control);
-	ctl = readw(&twi->control) | TWI_ENA;
-	writew(ctl, &twi->control);
+	clrbits_16(&twi->master_ctl, MEN);
+	clrbits_16(&twi->control, TWI_ENA);
+	setbits_16(&twi->control, TWI_ENA);
 	return ret;
 }
 
@@ -284,10 +275,10 @@ static int adi_i2c_set_bus_speed(struct udevice *bus, uint speed)
 	if (clkdiv < I2C_DUTY_MAX || clkdiv > I2C_DUTY_MIN)
 		return -1;
 	clkdiv = (clkdiv << 8) | (clkdiv & 0xff);
-	writew(clkdiv, &twi->clkdiv);
+	iowrite16(clkdiv, &twi->clkdiv);
 
 	/* Don't turn it on */
-	writew(speed > 100000 ? FAST : 0, &twi->master_ctl);
+	iowrite16(speed > 100000 ? FAST : 0, &twi->master_ctl);
 
 	return 0;
 }
@@ -359,13 +350,13 @@ int adi_i2c_probe(struct udevice *bus)
 	u16 prescale = ((dev->i2c_clk / 1000 / 1000 + 5) / 10) & 0x7F;
 
 	/* Set TWI internal clock as 10MHz */
-	writew(prescale, &twi->control);
+	iowrite16(prescale, &twi->control);
 
 	/* Set TWI interface clock as specified */
 	adi_i2c_set_bus_speed(bus, dev->speed);
 
 	/* Enable it */
-	writew(TWI_ENA | prescale, &twi->control);
+	iowrite16(TWI_ENA | prescale, &twi->control);
 
 	return 0;
 }
