@@ -45,7 +45,7 @@ static int adi_wdt_reset(struct udevice *dev)
 {
 	struct adi_wdt_priv *priv = dev_get_priv(dev);
 
-	writel(0, priv->wdt_base + WDOG_STAT);
+	iowrite32(0, priv->wdt_base + WDOG_STAT);
 
 	return 0;
 }
@@ -53,43 +53,41 @@ static int adi_wdt_reset(struct udevice *dev)
 static int adi_wdt_start(struct udevice *dev, u64 timeout_ms, ulong flags)
 {
 	struct adi_wdt_priv *priv = dev_get_priv(dev);
-	u32 sctl_val;
 
 	/* Disable SYSCD_RESETb input and clear the RCU0 reset status */
-	writel(0xf, priv->rcu_base + RCU_STAT);
-	writel(0x0, priv->rcu_base + RCU_CTL);
+	iowrite32(0xf, priv->rcu_base + RCU_STAT);
+	iowrite32(0x0, priv->rcu_base + RCU_CTL);
 
 	/* reset the SEC controller */
-	writel(0x2, priv->sec_base + SEC_GCTL);
-	writel(0x2, priv->sec_base + SEC_FCTL);
+	iowrite32(0x2, priv->sec_base + SEC_GCTL);
+	iowrite32(0x2, priv->sec_base + SEC_FCTL);
 
 	udelay(50);
 
 	/* enable SEC fault event */
-	writel(0x1, priv->sec_base + SEC_GCTL);
+	iowrite32(0x1, priv->sec_base + SEC_GCTL);
 
 	/* ANOMALY 36100004 Spurious External Fault event occurs when FCTL
 	 * is re-programmed when currently active fault is not cleared
 	 */
-	writel(0xc0, priv->sec_base + SEC_FCTL);
-	writel(0xc1, priv->sec_base + SEC_FCTL);
+	iowrite32(0xc0, priv->sec_base + SEC_FCTL);
+	iowrite32(0xc1, priv->sec_base + SEC_FCTL);
 
 	/* enable SEC fault source for watchdog0 */
-	sctl_val = readl((priv->sec_base + SEC_SCTL0) + 3 * 8) | 0x6;
-	writel(sctl_val, (priv->sec_base + SEC_SCTL0) + 3 * 8);
+	setbits_32(priv->sec_base + SEC_SCTL0 + (3*8), 0x6);
 
 	/* Enable SYSCD_RESETb input */
-	writel(0x100, priv->rcu_base + RCU_CTL);
+	iowrite32(0x100, priv->rcu_base + RCU_CTL);
 
 	/* enable watchdog0 */
-	writel(WDDIS, priv->wdt_base + WDOG_CTL);
+	iowrite32(WDDIS, priv->wdt_base + WDOG_CTL);
 
-	writel(timeout_ms / 1000 *
+	iowrite32(timeout_ms / 1000 *
 	       (clk_get_rate(&priv->clock) / (IS_ENABLED(CONFIG_SC58X) ? 2 : 1)),
 	       priv->wdt_base + WDOG_CNT);
 
-	writel(0, priv->wdt_base + WDOG_STAT);
-	writel(WDEN, priv->wdt_base + WDOG_CTL);
+	iowrite32(0, priv->wdt_base + WDOG_STAT);
+	iowrite32(WDEN, priv->wdt_base + WDOG_CTL);
 
 	return 0;
 }
