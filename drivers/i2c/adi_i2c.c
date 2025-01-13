@@ -7,7 +7,7 @@
  * Converted to driver model by Nathan Barrett-Morrison
  *
  * Contact: Nathan Barrett-Morrison <nathan.morrison@timesys.com>
- * Contact: Greg Malysa <malysagreg@gmail.com>
+ * Contact: Greg Malysa <greg.malysa@timesys.com>
  */
 
 #include <clk.h>
