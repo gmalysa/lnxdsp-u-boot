@@ -14,9 +14,9 @@
 #include <dm.h>
 #include <dma.h>
 #include <dma-uclass.h>
-#include <asm/io.h>
 #include <dm/device_compat.h>
 #include <linux/errno.h>
+#include <linux/io.h>
 
 #define HAS_MDMA	BIT(0)
 
@@ -82,7 +82,7 @@ static u8 adi_dma_get_msize(u32 n_bytecount, u32 n_address)
 
 static int adi_dma_get_ch_error(void __iomem *ch)
 {
-	u32 cause = (readl(ch + REG_STAT) &  BITM_DMA_STAT_ERRC) >>
+	u32 cause = (ioread32(ch + REG_STAT) &  BITM_DMA_STAT_ERRC) >>
 		    BITP_DMA_STAT_ERRC;
 	switch (cause) {
 	case 0:
@@ -120,9 +120,9 @@ static int adi_mdma_transfer(struct udevice *dev, int direction,
 	u8 n_psize;
 	u32 srcconfig;
 	u32 dstconfig;
-	u8 srcpsizemax = (readl(chsrc + REG_STAT) & BITM_DMA_STAT_PBWID) >>
+	u8 srcpsizemax = (ioread32(chsrc + REG_STAT) & BITM_DMA_STAT_PBWID) >>
 			 BITP_DMA_STAT_PBWID;
-	u8 dstpsizemax = (readl(chdst + REG_STAT) & BITM_DMA_STAT_PBWID) >>
+	u8 dstpsizemax = (ioread32(chdst + REG_STAT) & BITM_DMA_STAT_PBWID) >>
 			 BITP_DMA_STAT_PBWID;
 
 	const u32 CLRSTAT = (BITM_DMA_STAT_IRQDONE | BITM_DMA_STAT_IRQERR |
@@ -132,8 +132,8 @@ static int adi_mdma_transfer(struct udevice *dev, int direction,
 		return -EINVAL;
 
 	/* Clear DMA status */
-	writel(CLRSTAT, chsrc + REG_STAT);
-	writel(CLRSTAT, chdst + REG_STAT);
+	iowrite32(CLRSTAT, chsrc + REG_STAT);
+	iowrite32(CLRSTAT, chdst + REG_STAT);
 
 	/* Calculate MSIZE, PSIZE, XCNT and XMOD */
 	n_srcmsize = adi_dma_get_msize(bytecount, src);
@@ -146,34 +146,32 @@ static int adi_mdma_transfer(struct udevice *dev, int direction,
 	dstconfig = DMA_MDMA_DST_DEFAULT_CONFIG(n_psize, n_dstmsize);
 
 	/* Load the DMA descriptors */
-	writel(src,			chsrc + REG_ADDRSTART);
-	writel(bytecount >> n_srcmsize,	chsrc + REG_XCNT);
-	writel(1 << n_srcmsize,		chsrc + REG_XMOD);
-	writel(dst,			chdst + REG_ADDRSTART);
-	writel(bytecount >> n_dstmsize,	chdst + REG_XCNT);
-	writel(1 << n_dstmsize,		chdst + REG_XMOD);
+	iowrite32(src,			chsrc + REG_ADDRSTART);
+	iowrite32(bytecount >> n_srcmsize,	chsrc + REG_XCNT);
+	iowrite32(1 << n_srcmsize,		chsrc + REG_XMOD);
+	iowrite32(dst,			chdst + REG_ADDRSTART);
+	iowrite32(bytecount >> n_dstmsize,	chdst + REG_XCNT);
+	iowrite32(1 << n_dstmsize,		chdst + REG_XMOD);
 
-	writel(dstconfig, chdst + REG_CFG);
-	writel(srcconfig, chsrc + REG_CFG);
+	iowrite32(dstconfig, chdst + REG_CFG);
+	iowrite32(srcconfig, chsrc + REG_CFG);
 
 	/* Wait for DMA to complete while checking for a DMA error */
 	do {
-		reg = readl(chsrc + REG_STAT);
+		reg = ioread32(chsrc + REG_STAT);
 		if ((reg & BITM_DMA_STAT_IRQERR) == BITM_DMA_STAT_IRQERR) {
 			result = adi_dma_get_ch_error(chsrc);
 			break;
 		}
-		reg = readl(chdst + REG_STAT);
+		reg = ioread32(chdst + REG_STAT);
 		if ((reg & BITM_DMA_STAT_IRQERR) == BITM_DMA_STAT_IRQERR) {
 			result = adi_dma_get_ch_error(chdst);
 			break;
 		}
 	} while ((reg & BITM_DMA_STAT_IRQDONE) == 0);
 
-	reg = readl(chsrc + REG_CFG);
-	writel(reg & ~1, chsrc + REG_CFG);
-	reg = readl(chdst + REG_CFG);
-	writel(reg & ~1, chdst + REG_CFG);
+	clrbits_32(chsrc + REG_CFG, 1);
+	clrbits_32(chdst + REG_CFG, 1);
 
 	return result;
 }
