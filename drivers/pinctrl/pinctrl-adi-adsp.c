@@ -132,6 +132,11 @@ static int adsp_pinctrl_probe(struct udevice *udev)
 	priv->base = dev_read_addr_ptr(udev);
 	priv->npins = dev_read_u32_default(udev, "adi,npins", 0);
 
+	if (!priv->base) {
+		dev_err(udev, "Missing or invalid pinctrl base address\n");
+		return -ENOENT;
+	}
+
 	if (!priv->npins) {
 		dev_err(udev, "Missing adi,npins property!\n");
 		return -ENOENT;
