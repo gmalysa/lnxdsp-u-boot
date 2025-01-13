@@ -13,7 +13,7 @@
 #include <net.h>
 #include <phy.h>
 #include <reset.h>
-#include <asm/io.h>
+#include <linux/io.h>
 
 #include <asm/arch-adi/sc5xx/sc5xx.h>
 
@@ -22,7 +22,6 @@
 static int eqos_start_resets_adi(struct udevice *dev)
 {
 	struct eqos_priv *eqos = dev_get_priv(dev);
-	u32 val;
 
 	/*
 	 * Settings need to latch with the DMA reset below. Currently only
@@ -30,10 +29,7 @@ static int eqos_start_resets_adi(struct udevice *dev)
 	 * the future
 	 */
 	sc5xx_enable_rgmii();
-
-	val = readl(&eqos->dma_regs->mode);
-	val |= EQOS_DMA_MODE_SWR;
-	writel(val, &eqos->dma_regs->mode);
+	setbits_32(&eqos->dma_regs->mode, EQOS_DMA_MODE_SWR);
 
 	return 0;
 }
