@@ -49,11 +49,6 @@ struct adi_sdhc_plat {
 	struct mmc mmc;
 };
 
-struct adi_sdhc {
-	struct sdhci_host host;
-	void *base;
-};
-
 void adi_dwcmshc_adma_write_desc(struct sdhci_host *host, void **desc,
 			     dma_addr_t addr, int len, bool end)
 {
@@ -81,8 +76,7 @@ static int adi_dwcmshc_sdhci_probe(struct udevice *dev)
 {
 	struct mmc_uclass_priv *upriv = dev_get_uclass_priv(dev);
 	struct adi_sdhc_plat *plat = dev_get_plat(dev);
-	struct adi_sdhc *prv = dev_get_priv(dev);
-	struct sdhci_host *host = &prv->host;
+	struct sdhci_host *host = dev_get_priv(dev);
 	int max_frequency, ret;
 	struct clk clk;
 
@@ -100,7 +94,7 @@ static int adi_dwcmshc_sdhci_probe(struct udevice *dev)
 		host->host_caps |= MMC_MODE_8BIT;
 
 	host->mmc = &plat->mmc;
-	host->mmc->priv = &prv->host;
+	host->mmc->priv = host;
 	host->mmc->dev = dev;
 	upriv->mmc = host->mmc;
 
@@ -147,6 +141,6 @@ U_BOOT_DRIVER(adi_dwcmshc_sdhci_drv) = {
 	.ops		= &sdhci_ops,
 	.bind		= adi_sdhci_bind,
 	.probe		= adi_dwcmshc_sdhci_probe,
-	.priv_auto	= sizeof(struct adi_sdhc),
+	.priv_auto	= sizeof(struct sdhci_host),
 	.plat_auto	= sizeof(struct adi_sdhc_plat),
 };
