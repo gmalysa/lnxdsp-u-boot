@@ -7,7 +7,7 @@
  * Converted to driver model by Nathan Barrett-Morrison
  *
  * Contact: Nathan Barrett-Morrison <nathan.morrison@timesys.com>
- * Contact: Greg Malysa <greg.malysa@timesys.com>
+ * Contact: Greg Malysa <malysagreg@gmail.com>
  * Contact: Ian Roberts <ian.roberts@timesys.com>
  * Contact: Piotr Wojtaszczyk <piotr.wojtaszczyk@timesys.com>
  *
@@ -15,10 +15,11 @@
 
 #include <clk.h>
 #include <dm.h>
+#include <mapmem.h>
 #include <spi.h>
 #include <spi-mem.h>
-#include <asm/io.h>
 #include <dm/device_compat.h>
+#include <linux/io.h>
 
 #define SPI_IDLE_VAL	0xff
 
@@ -257,7 +258,7 @@ struct adi_spi_regs {
 struct adi_spi_platdata {
 	u32 max_hz;
 	u32 bus_num;
-	struct adi_spi_regs *regs;
+	struct adi_spi_regs __iomem *regs;
 };
 
 struct adi_spi_priv {
@@ -265,9 +266,7 @@ struct adi_spi_priv {
 	u32 clock;
 	u32 bus_num;
 	u32 max_cs;
-	struct adi_spi_regs *regs;
-	unsigned short *pins;
-	void *memory_map;
+	struct adi_spi_regs __iomem *regs;
 };
 
 static int adi_spi_cs_info(struct udevice *bus, uint cs,
@@ -295,7 +294,7 @@ static int adi_spi_of_to_plat(struct udevice *bus)
 	if (addr == FDT_ADDR_T_NONE)
 		return -EINVAL;
 
-	plat->regs = (struct adi_spi_regs *)addr;
+	plat->regs = map_sysmem(addr, sizeof(*plat->regs));
 
 	return 0;
 }
@@ -309,9 +308,9 @@ static int adi_spi_probe(struct udevice *bus)
 	priv->regs = plat->regs;
 	priv->max_cs = dev_read_u32_default(bus, "num-cs", MAX_CTRL_CS);
 
-	writel(0x0, &plat->regs->control);
-	writel(0x0, &plat->regs->rx_control);
-	writel(0x0, &plat->regs->tx_control);
+	iowrite32(0x0, &plat->regs->control);
+	iowrite32(0x0, &plat->regs->rx_control);
+	iowrite32(0x0, &plat->regs->tx_control);
 
 	return 0;
 }
@@ -331,9 +330,9 @@ static int adi_spi_claim_bus(struct udevice *dev)
 	debug("%s: control:%i clock:%i\n",
 	      __func__, priv->control, priv->clock);
 
-	writel(priv->control, &priv->regs->control);
-	writel(priv->clock, &priv->regs->clock);
-	writel(0x0, &priv->regs->delay);
+	iowrite32(priv->control, &priv->regs->control);
+	iowrite32(priv->clock, &priv->regs->clock);
+	iowrite32(0x0, &priv->regs->delay);
 
 	return 0;
 }
@@ -348,31 +347,24 @@ static int adi_spi_release_bus(struct udevice *dev)
 	debug("%s: control:%i clock:%i\n",
 	      __func__, priv->control, priv->clock);
 
-	writel(0x0, &priv->regs->rx_control);
-	writel(0x0, &priv->regs->tx_control);
-	writel(0x0, &priv->regs->control);
+	iowrite32(0x0, &priv->regs->rx_control);
+	iowrite32(0x0, &priv->regs->tx_control);
+	iowrite32(0x0, &priv->regs->control);
 
 	return 0;
 }
 
 void adi_spi_enable_ssel(struct adi_spi_priv *priv, int cs)
 {
-	u32 ssel = readl(&priv->regs->ssel);
-
-	ssel = readl(&priv->regs->ssel);
-	ssel |= BIT_SSEL_EN(cs);
-	writel(ssel, &priv->regs->ssel);
+	setbits_32(&priv->regs->ssel, BIT_SSEL_EN(cs));
 }
 
 void adi_spi_set_ssel(struct adi_spi_priv *priv, int cs, int high)
 {
-	u32 ssel = readl(&priv->regs->ssel);
-
 	if (high)
-		ssel |= BIT_SSEL_VAL(cs);
+		setbits_32(&priv->regs->ssel, BIT_SSEL_VAL(cs));
 	else
-		ssel &= ~BIT_SSEL_VAL(cs);
-	writel(ssel, &priv->regs->ssel);
+		clrbits_32(&priv->regs->ssel, BIT_SSEL_VAL(cs));
 }
 
 void adi_spi_cs_activate(struct adi_spi_priv *priv, struct dm_spi_slave_plat *slave_plat)
@@ -385,15 +377,16 @@ void adi_spi_cs_activate(struct adi_spi_priv *priv, struct dm_spi_slave_plat *sl
 
 void adi_spi_cs_deactivate(struct adi_spi_priv *priv, struct dm_spi_slave_plat *slave_plat)
 {
-	bool high = !(slave_plat->mode & SPI_CS_HIGH);
+	bool high = slave_plat->mode & SPI_CS_HIGH;
 
-	adi_spi_set_ssel(priv, slave_plat->cs, high);
+	/* invert CS for matching SSEL to deactivate */
+	adi_spi_set_ssel(priv, slave_plat->cs, !high);
 }
 
 static void discard_rx_fifo_contents(struct adi_spi_regs *regs)
 {
-	while (!(readl(&regs->status) & SPI_STAT_RFE))
-		readl(&regs->rfifo);
+	while (!(ioread32(&regs->status) & SPI_STAT_RFE))
+		ioread32(&regs->rfifo);
 }
 
 static int adi_spi_fifo_mio_xfer(struct adi_spi_priv *priv, const u8 *tx, u8 *rx,
@@ -402,42 +395,41 @@ static int adi_spi_fifo_mio_xfer(struct adi_spi_priv *priv, const u8 *tx, u8 *rx
 	u8 value;
 
 	/* switch current SPI transfer to mio SPI mode */
-	writel((priv->control & ~SPI_CTL_SOSI) | mio_mode,
-	       &priv->regs->control);
+	clrsetbits_32(&priv->regs->control, SPI_CTL_SOSI, mio_mode);
 	/*
 	 * Data can only be transferred in one direction in multi-io SPI
 	 * modes, trigger the transfer in respective direction.
 	 */
 	if (rx) {
-		writel(0x0, &priv->regs->tx_control);
-		writel(SPI_RXCTL_REN | SPI_RXCTL_RTI,
+		iowrite32(0x0, &priv->regs->tx_control);
+		iowrite32(SPI_RXCTL_REN | SPI_RXCTL_RTI,
 		       &priv->regs->rx_control);
 
 		while (bytes--) {
-			while (readl(&priv->regs->status) &
+			while (ioread32(&priv->regs->status) &
 				SPI_STAT_RFE)
 				if (ctrlc())
 					return -1;
-			value = readl(&priv->regs->rfifo);
+			value = ioread32(&priv->regs->rfifo);
 			*rx++ = value;
 		}
 	} else if (tx) {
-		writel(0x0, &priv->regs->rx_control);
-		writel(SPI_TXCTL_TEN | SPI_TXCTL_TTI,
+		iowrite32(0x0, &priv->regs->rx_control);
+		iowrite32(SPI_TXCTL_TEN | SPI_TXCTL_TTI,
 		       &priv->regs->tx_control);
 
 		while (bytes--) {
 			value = *tx++;
-			writel(value, &priv->regs->tfifo);
-			while (readl(&priv->regs->status) &
+			iowrite32(value, &priv->regs->tfifo);
+			while (ioread32(&priv->regs->status) &
 				SPI_STAT_TFF)
 				if (ctrlc())
 					return -1;
 		}
 
 		/* Wait till the tfifo is empty */
-		while ((readl(&priv->regs->status) & SPI_STAT_TFS) !=
-			0x40000)
+		while ((ioread32(&priv->regs->status) & SPI_STAT_TFS) !=
+			SPI_STAT_TFIFO_EMPTY)
 			if (ctrlc())
 				return -1;
 	} else {
@@ -450,29 +442,23 @@ static int adi_spi_fifo_1x_xfer(struct adi_spi_priv *priv, const u8 *tx, u8 *rx,
 				uint bytes)
 {
 	u8 value;
-	int spi_idle;
 
-	#if defined(CONFIG_SPI_IDLE_VAL)
-		spi_idle = CONFIG_SPI_IDLE_VAL;
-	#else
-		spi_idle = SPI_IDLE_VAL;
-	#endif
 	/*
 	 * Set current SPI transfer in normal mode and trigger
 	 * the bi-direction transfer by tx write operation.
 	 */
-	writel(priv->control, &priv->regs->control);
-	writel(SPI_RXCTL_REN, &priv->regs->rx_control);
-	writel(SPI_TXCTL_TEN | SPI_TXCTL_TTI, &priv->regs->tx_control);
+	iowrite32(priv->control, &priv->regs->control);
+	iowrite32(SPI_RXCTL_REN, &priv->regs->rx_control);
+	iowrite32(SPI_TXCTL_TEN | SPI_TXCTL_TTI, &priv->regs->tx_control);
 
 	while (bytes--) {
-		value = (tx ? *tx++ : spi_idle);
+		value = (tx ? *tx++ : SPI_IDLE_VAL);
 		debug("%s: tx:%x ", __func__, value);
-		writel(value, &priv->regs->tfifo);
-		while (readl(&priv->regs->status) & SPI_STAT_RFE)
+		iowrite32(value, &priv->regs->tfifo);
+		while (ioread32(&priv->regs->status) & SPI_STAT_RFE)
 			if (ctrlc())
 				return -1;
-		value = readl(&priv->regs->rfifo);
+		value = ioread32(&priv->regs->rfifo);
 		if (rx)
 			*rx++ = value;
 		debug("rx:%x\n", value);
@@ -491,7 +477,7 @@ static int adi_spi_fifo_xfer(struct adi_spi_priv *priv, int buswidth,
 	case 4:
 		return adi_spi_fifo_mio_xfer(priv, tx, rx, bytes, SPI_CTL_MIO_QUAD);
 	default:
-		return -ENOSYS;
+		return -ENOTSUPP;
 	}
 }
 
