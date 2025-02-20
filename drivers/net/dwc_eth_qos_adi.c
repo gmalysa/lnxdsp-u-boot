@@ -38,6 +38,14 @@ static int eqos_probe_resources_adi(struct udevice *dev)
 {
 	struct eqos_priv *eqos = dev_get_priv(dev);
 	phy_interface_t interface;
+	int ret;
+
+	ret = eqos_get_base_addr_dt(dev);
+	if (ret) {
+		pr_err("eqos_get_base_addr_dt failed: %d\n", ret);
+		return ret;
+	}
+
 
 	interface = eqos->config->interface(dev);
 	if (interface == PHY_INTERFACE_MODE_NA) {
