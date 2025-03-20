@@ -306,6 +306,14 @@ RUN wget -O - https://coreboot.org/releases/coreboot-25.03.tar.xz | tar -C /tmp 
     sudo cp build/coreboot.rom build/cbfstool /opt/coreboot/ && \
     rm -rf /tmp/coreboot-25.03
 
+# Build ldr tool for ADI boards and install to match expected abi name
+RUN git clone https://github.com/analogdevicesinc/lnxdsp-arm-poky-linux-gnueabi-ldr.git /tmp/lnxdsp-arm-poky-linux-gnueabi-ldr && \
+	cd /tmp/lnxdsp-arm-poky-linux-gnueabi-ldr/src/ldr && \
+	./configure && \
+	make -j $(nproc) && \
+	cp ldr /usr/bin/arm-linux-gnueabi-ldr && \
+	cp ldr /usr/bin/aarch64-linux-ldr
+
 # Create our user/group
 RUN echo uboot ALL=NOPASSWD: ALL > /etc/sudoers.d/uboot
 RUN useradd -m -U uboot
