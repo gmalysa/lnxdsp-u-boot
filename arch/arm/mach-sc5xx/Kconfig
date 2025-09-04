@@ -243,7 +243,7 @@ config ADI_BUG_EZKHW21
 
 config ADI_CARRIER_SOMCRR_EZKIT
 	bool "Support the EV-SOMCRR-EZKIT"
-	depends on (SC59X || SC59X_64)
+	depends on (SC59X || SC59X_64) && !ADI_CARRIER_SOMCRR_EZLITE
 	help
 	  Say y to include support for the EV-SOMCRR-EZKIT carrier board,
 	  which is compatible with the SC594 and SC598 SOMs. The EZKIT is
